@@ -73,6 +73,9 @@ changes nothing.
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [FFmpeg](https://ffmpeg.org)
 - A music player, for example Amberol, VLC, or mpv
 
+If something is missing, Mixtape says what and shows the command that
+installs it. **Settings** lists every program it uses.
+
 On Arch Linux and Omarchy:
 
 ```bash

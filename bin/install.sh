@@ -8,6 +8,7 @@ done
 cargo build --release
 install -Dm755 target/release/mixtape "$HOME/.local/bin/mixtape"
 install -Dm644 assets/mixtape.desktop "$HOME/.local/share/applications/mixtape.desktop"
+install -Dm644 assets/mixtape.svg "$HOME/.local/share/icons/hicolor/scalable/apps/mixtape.svg"
 # Lets the Update button in Mixtape find this folder.
 data="${XDG_DATA_HOME:-$HOME/.local/share}/mixtape"
 mkdir -p "$data"

@@ -6,6 +6,11 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 
 ## Unreleased
 
+- A cassette app icon, installed by `bin/install.sh`.
+- A setup check: when uv, yt-dlp, ffmpeg or ffprobe is missing, a banner
+  says what each is for and shows the install command for your distribution
+  (Arch, Debian/Ubuntu, Fedora), with **Copy** and **Check again**.
+  **Settings** lists every program Mixtape uses and whether it's installed.
 - Library: a filter box (every word must match the artist, album or song
   name) and a **Recently added** view of the newest 200 songs.
 - Search: paste a YouTube or YouTube Music link to a song, album, playlist or

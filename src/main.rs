@@ -152,6 +152,8 @@ struct App {
     scanning: bool,
     selected: HashSet<PathBuf>,
     stems: bool,
+    /// Tools that weren't found at startup or at the last "Check again".
+    missing: Vec<&'static backend::Tool>,
     /// Selected songs and folders waiting on "Move to Trash?".
     trash_confirm: Option<Vec<PathBuf>>,
     update: Update,
@@ -205,6 +207,7 @@ impl App {
             scanning: false,
             selected: HashSet::new(),
             stems: backend::stems_installed(),
+            missing: backend::missing_tools(),
             trash_confirm: None,
             update: Update::None,
             preview: Preview { mpv: backend::mpv_installed(), playing: None, clicked: None },
@@ -696,6 +699,41 @@ impl App {
         }
     }
 
+    /// Shown while a required tool is missing: what it's for and the command that installs it.
+    fn setup_banner(&mut self, ui: &mut egui::Ui) {
+        let required: Vec<_> = self.missing.iter().copied().filter(|t| t.required).collect();
+        if required.is_empty() {
+            return;
+        }
+        let warn = ui.visuals().warn_fg_color;
+        egui::Frame::group(ui.style()).stroke(egui::Stroke::new(1.5, warn)).inner_margin(12.0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.colored_label(warn, egui::RichText::new("Mixtape needs a few more programs").strong());
+            for t in &required {
+                ui.label(format!("•  {} for {}", t.bin, t.needed_for));
+            }
+            let (command, notes) = backend::install_hint(&required);
+            if let Some(command) = &command {
+                ui.label("Install them with:");
+                ui.horizontal(|ui| {
+                    ui.code(command);
+                    if ui.small_button("Copy").clicked() {
+                        ui.ctx().copy_text(command.clone());
+                    }
+                });
+            }
+            for note in notes {
+                ui.label(note);
+            }
+            if ui.button("Check again").clicked() {
+                self.missing = backend::missing_tools();
+                self.stems = backend::stems_installed();
+                self.preview.mpv = backend::mpv_installed();
+            }
+        });
+        ui.add_space(6.0);
+    }
+
     fn footer(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.weak(concat!("Mixtape ", env!("CARGO_PKG_VERSION")));
@@ -818,6 +856,25 @@ impl App {
                 ui.radio_value(&mut self.draft.format, Format::Mp3, "MP3: plays everywhere");
                 ui.radio_value(&mut self.draft.format, Format::Original, "Original: best quality, no conversion (Opus, or AAC with Premium)");
                 ui.small("Original files are about half the size. Some car stereos and older devices can't play Opus.");
+            });
+            ui.end_row();
+
+            ui.label("Programs");
+            ui.vertical(|ui| {
+                for t in &backend::TOOLS {
+                    let (mark, color) = if backend::tool_installed(t) {
+                        ("✔", ui.visuals().hyperlink_color)
+                    } else if t.required {
+                        ("✖", ui.visuals().error_fg_color)
+                    } else {
+                        ("–", ui.visuals().weak_text_color())
+                    };
+                    let optional = if t.required { "" } else { " (optional)" };
+                    ui.horizontal(|ui| {
+                        ui.colored_label(color, mark);
+                        ui.label(format!("{} for {}{optional}", t.bin, t.needed_for));
+                    });
+                }
             });
             ui.end_row();
 
@@ -1058,6 +1115,7 @@ impl eframe::App for App {
                     ui.selectable_value(&mut self.tab, Tab::Settings, gear).on_hover_text("Settings");
                 });
             });
+            self.setup_banner(ui);
             if let Some(s) = self.status.clone() {
                 ui.horizontal(|ui| {
                     ui.colored_label(ui.visuals().error_fg_color, s);

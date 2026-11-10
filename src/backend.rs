@@ -150,6 +150,93 @@ pub fn detected_players() -> Vec<(&'static str, &'static str)> {
 /// Command that opens a song in the Stems app (splits a song into instruments), when installed.
 pub const STEMS: &str = "stems open";
 
+/// A command Mixtape runs, and the package that provides it on each family of distributions.
+pub struct Tool {
+    pub bin: &'static str,
+    pub needed_for: &'static str,
+    pub required: bool,
+    arch: &'static str,
+    debian: Option<&'static str>,
+    fedora: &'static str,
+}
+
+pub const TOOLS: [Tool; 6] = [
+    Tool { bin: "uv", needed_for: "searching YouTube Music", required: true, arch: "uv", debian: None, fedora: "uv" },
+    Tool { bin: "yt-dlp", needed_for: "downloading", required: true, arch: "yt-dlp", debian: Some("yt-dlp"), fedora: "yt-dlp" },
+    Tool { bin: "ffmpeg", needed_for: "converting audio and cover art", required: true, arch: "ffmpeg", debian: Some("ffmpeg"), fedora: "ffmpeg" },
+    Tool { bin: "ffprobe", needed_for: "song details in the Library", required: true, arch: "ffmpeg", debian: Some("ffmpeg"), fedora: "ffmpeg" },
+    Tool { bin: "mpv", needed_for: "previews", required: false, arch: "mpv", debian: Some("mpv"), fedora: "mpv" },
+    Tool { bin: "gio", needed_for: "Move to Trash", required: false, arch: "glib2", debian: Some("libglib2.0-bin"), fedora: "glib2" },
+];
+
+/// Tools that aren't installed, required ones first.
+pub fn missing_tools() -> Vec<&'static Tool> {
+    let mut missing: Vec<_> = TOOLS.iter().filter(|t| !on_path(t.bin)).collect();
+    missing.sort_by_key(|t| !t.required);
+    missing
+}
+
+pub fn tool_installed(t: &Tool) -> bool {
+    on_path(t.bin)
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Distro {
+    Arch,
+    Debian,
+    Fedora,
+    Other,
+}
+
+fn distro(os_release: &str) -> Distro {
+    let ids: Vec<&str> = os_release
+        .lines()
+        .filter_map(|l| l.strip_prefix("ID=").or_else(|| l.strip_prefix("ID_LIKE=")))
+        .flat_map(|v| v.trim_matches('"').split_whitespace())
+        .collect();
+    let has = |names: &[&str]| ids.iter().any(|id| names.contains(id));
+    if has(&["arch"]) {
+        Distro::Arch
+    } else if has(&["debian", "ubuntu"]) {
+        Distro::Debian
+    } else if has(&["fedora", "rhel"]) {
+        Distro::Fedora
+    } else {
+        Distro::Other
+    }
+}
+
+/// The command that installs these tools here, and anything it can't cover.
+pub fn install_hint(tools: &[&Tool]) -> (Option<String>, Vec<String>) {
+    install_hint_for(distro(&std::fs::read_to_string("/etc/os-release").unwrap_or_default()), tools)
+}
+
+fn install_hint_for(distro: Distro, tools: &[&Tool]) -> (Option<String>, Vec<String>) {
+    let mut packages: Vec<&str> = Vec::new();
+    let mut notes = Vec::new();
+    for t in tools {
+        let package = match distro {
+            Distro::Arch => Some(t.arch),
+            Distro::Debian => t.debian,
+            Distro::Fedora => Some(t.fedora),
+            Distro::Other => None,
+        };
+        match package {
+            Some(p) if !packages.contains(&p) => packages.push(p),
+            Some(_) => {}
+            None if t.bin == "uv" => notes.push("Install uv from https://docs.astral.sh/uv/".to_string()),
+            None => notes.push(format!("Install {} with your package manager", t.bin)),
+        }
+    }
+    let tool = match distro {
+        Distro::Arch => "sudo pacman -S --needed",
+        Distro::Debian => "sudo apt install",
+        Distro::Fedora => "sudo dnf install",
+        Distro::Other => "",
+    };
+    ((!packages.is_empty()).then(|| format!("{tool} {}", packages.join(" "))), notes)
+}
+
 pub fn mpv_installed() -> bool {
     on_path("mpv")
 }
@@ -693,6 +780,21 @@ mod tests {
         let opus = r#"{"streams":[{"codec_name":"opus"}],"format":{"duration":"61","bit_rate":"127304"}}"#;
         assert_eq!(parse_probe(opus, 3_400_000, "OPUS").describe(), "Opus · 127 kbps · 1:01 · 3.4 MB");
         assert_eq!(parse_probe("", 1_000, "FLAC").describe(), "FLAC · 0.0 MB");
+    }
+
+    #[test]
+    fn install_hints() {
+        assert_eq!(distro("ID=omarchy\nID_LIKE=arch\n"), Distro::Arch);
+        assert_eq!(distro("ID=ubuntu\nID_LIKE=\"ubuntu debian\"\n"), Distro::Debian);
+        assert_eq!(distro("ID=fedora\n"), Distro::Fedora);
+        assert_eq!(distro("ID=gentoo\n"), Distro::Other);
+        let [uv, ytdlp, ffmpeg, ffprobe, ..] = &TOOLS;
+        let all = [uv, ytdlp, ffmpeg, ffprobe];
+        assert_eq!(install_hint_for(Distro::Arch, &all), (Some("sudo pacman -S --needed uv yt-dlp ffmpeg".into()), vec![]));
+        let (cmd, notes) = install_hint_for(Distro::Debian, &all);
+        assert_eq!(cmd.as_deref(), Some("sudo apt install yt-dlp ffmpeg"));
+        assert!(notes[0].contains("docs.astral.sh/uv"));
+        assert_eq!(install_hint_for(Distro::Other, &[ytdlp]).0, None);
     }
 
     #[test]
