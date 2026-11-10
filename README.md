@@ -43,6 +43,20 @@ when Omarchy is installed and works on any Linux desktop otherwise.
   player (Amberol, VLC, mpv, or any command), the file format, and whether to
   use a YouTube Music Premium login.
 
+## Keyboard shortcuts
+
+| Keys | Does |
+| --- | --- |
+| Ctrl+1 / Ctrl+2 / Ctrl+, | Library / Search / Settings |
+| Ctrl+F | Search box, or the Library filter |
+| Space | Preview the result under the pointer, or stop it |
+| Ctrl+D | Download selected |
+| Delete | Move the selected songs and folders to the Trash |
+| F5 | Rescan the music folder |
+| Esc | Stop the preview and clear the Library filter |
+| Ctrl + / Ctrl − / Ctrl 0 | Bigger, smaller, normal text |
+| ? or F1 | List the shortcuts |
+
 ## Audio quality
 
 Mixtape always downloads the best audio YouTube Music offers your account.

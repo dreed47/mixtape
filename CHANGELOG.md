@@ -6,6 +6,15 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 
 ## Unreleased
 
+- Keyboard shortcuts: Ctrl+1 / Ctrl+2 / Ctrl+, for the tabs, Ctrl+F for the
+  search box or Library filter, Space to preview the result under the
+  pointer, Ctrl+D to download, Delete to move to the Trash, F5 to rescan, Esc
+  to stop the preview and clear the filter. **?**, F1 or **⌨ Shortcuts** in
+  the footer lists them.
+- Search results show album covers.
+- Long titles end in "…" (the full title shows on hover) instead of running
+  into the details on the right; details line up at the right edge.
+- The Library toolbars wrap onto a second line in a narrow window.
 - The download queue survives a restart: waiting and unfinished songs resume
   the next time Mixtape opens. Waiting songs have **Cancel**, and
   **Cancel waiting** drops them all.

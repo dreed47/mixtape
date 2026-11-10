@@ -25,6 +25,9 @@ pub struct Song {
     /// Position on the album, when the song came from an album's track list.
     #[serde(default)]
     pub track: Option<u32>,
+    /// Cover thumbnail (https), shown in search results.
+    #[serde(default)]
+    pub thumb: String,
 }
 
 #[derive(Deserialize, Clone)]
@@ -36,6 +39,8 @@ pub struct Album {
     /// "Album", "Single" or "EP".
     #[serde(default)]
     pub kind: String,
+    #[serde(default)]
+    pub thumb: String,
 }
 
 #[derive(Deserialize, Clone)]
@@ -1029,6 +1034,7 @@ mod tests {
             album: album.into(),
             duration: String::new(),
             track: None,
+            thumb: String::new(),
         }
     }
 

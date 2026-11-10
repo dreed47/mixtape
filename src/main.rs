@@ -50,6 +50,8 @@ enum Update {
 struct Preview {
     mpv: bool,
     playing: Option<(String, std::process::Child)>,
+    /// The result under the pointer last frame, for Space.
+    hovered: Option<String>,
     /// The ▶ or ⏹ clicked this frame.
     clicked: Option<String>,
 }
@@ -136,6 +138,13 @@ struct App {
     status: Option<String>,
 
     query: String,
+    /// Put the cursor in the Library filter box (Ctrl+F on the Library).
+    focus_filter: bool,
+    /// Requests from keyboard shortcuts, handled where the button is drawn.
+    download_now: bool,
+    trash_now: bool,
+    show_keys: bool,
+    rescan_requested: bool,
     /// Put the cursor in the search box the first time the Search tab shows.
     autofocus: bool,
     search_gen: u64,
@@ -197,6 +206,7 @@ impl App {
         let (tx, rx) = channel();
         let settings = Settings::load();
         theme::install_fonts(ctx);
+        egui_extras::install_image_loaders(ctx); // cover thumbnails in search results, fetched over https
         ctx.options_mut(|o| o.zoom_with_keyboard = false); // handled in zoom_keys so the size is saved
         ctx.set_zoom_factor(settings.text_scale.clamp(*backend::TEXT_SCALES.start(), *backend::TEXT_SCALES.end()));
         let mut app = Self {
@@ -207,6 +217,11 @@ impl App {
             status: None,
             query: String::new(),
             autofocus: true,
+            focus_filter: false,
+            download_now: false,
+            trash_now: false,
+            show_keys: false,
+            rescan_requested: false,
             search_gen: 0,
             searching: false,
             search_error: None,
@@ -235,7 +250,7 @@ impl App {
             batch: (0, 0),
             trash_confirm: None,
             update: Update::None,
-            preview: Preview { mpv: backend::mpv_installed(), playing: None, clicked: None },
+            preview: Preview { mpv: backend::mpv_installed(), playing: None, clicked: None, hovered: None },
             update_checked: None,
             details: HashMap::new(),
             probing: HashSet::new(),
@@ -458,18 +473,21 @@ impl App {
         }
         egui::ScrollArea::vertical().auto_shrink(false).stick_to_bottom(true).show(ui, |ui| {
             for song in &self.history {
-                ui.horizontal(|ui| {
-                    ui.strong(&song.title);
-                    ui.label(&song.artists);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                row(
+                    ui,
+                    |ui| {
                         match self.jobs.get(&song.id) {
                             Some(Job::Failed(_)) if ui.small_button("Retry").clicked() => retry = Some(song.clone()),
                             Some(Job::Queued) if ui.small_button("Cancel").clicked() => cancel = Some(Some(song.id.clone())),
                             _ => {}
                         }
                         job_status(ui, self.jobs.get(&song.id), false);
-                    });
-                });
+                    },
+                    |ui| {
+                        fit(ui, egui::RichText::new(format!("{}  ", song.title)).strong());
+                        fit(ui, &song.artists);
+                    },
+                );
             }
         });
         if let Some(song) = retry {
@@ -524,7 +542,8 @@ impl App {
         };
         ui.horizontal(|ui| {
             let label = format!("Download selected ({})", selected.len());
-            if ui.add_enabled(!selected.is_empty(), accent_button(ui, label)).clicked() {
+            let clicked = ui.add_enabled(!selected.is_empty(), accent_button(ui, label)).on_hover_text("Ctrl+D").clicked();
+            if (clicked || std::mem::take(&mut self.download_now)) && !selected.is_empty() {
                 selected.into_iter().for_each(|song| self.enqueue(song));
                 self.rows_mut().for_each(|r| r.checked = false);
                 self.albums.iter_mut().for_each(|a| a.checked = false);
@@ -575,26 +594,33 @@ impl App {
             if !albums.is_empty() {
                 ui.heading("Albums");
                 for a in albums.iter_mut() {
-                    ui.horizontal(|ui| {
-                        let arrow = if a.open { "⏷" } else { "⏵" };
-                        if ui.button(arrow).on_hover_text("Show tracks").clicked() {
-                            a.open = !a.open;
-                        }
-                        if ui.checkbox(&mut a.checked, "").on_hover_text("Select every track not already in your library").changed()
-                            && let Some(tracks) = &mut a.tracks
-                        {
-                            for t in tracks {
-                                t.checked = a.checked && !in_library(logged, scan, &t.song);
+                    let loading = a.loading;
+                    row(
+                        ui,
+                        |ui| {
+                            if loading {
+                                ui.spinner();
                             }
-                        }
-                        ui.vertical(|ui| {
-                            ui.strong(&a.album.title);
-                            ui.label(format!("{}  ·  {} {}", a.album.artists, a.album.kind, a.album.year));
-                        });
-                        if a.loading {
-                            ui.spinner();
-                        }
-                    });
+                        },
+                        |ui| {
+                            let arrow = if a.open { "⏷" } else { "⏵" };
+                            if ui.button(arrow).on_hover_text("Show tracks").clicked() {
+                                a.open = !a.open;
+                            }
+                            if ui.checkbox(&mut a.checked, "").on_hover_text("Select every track not already in your library").changed()
+                                && let Some(tracks) = &mut a.tracks
+                            {
+                                for t in tracks {
+                                    t.checked = a.checked && !in_library(logged, scan, &t.song);
+                                }
+                            }
+                            cover(ui, &a.album.thumb, 48.0);
+                            ui.vertical(|ui| {
+                                fit(ui, egui::RichText::new(&a.album.title).strong());
+                                fit(ui, format!("{}  ·  {} {}", a.album.artists, a.album.kind, a.album.year));
+                            });
+                        },
+                    );
                     if (a.open || a.checked) && a.tracks.is_none() && !a.loading && a.error.is_none() {
                         load_album.push(a.album.id.clone());
                     }
@@ -672,7 +698,7 @@ impl App {
 
     fn library_tab(&mut self, ui: &mut egui::Ui) {
         let dir = self.settings.music_dir.clone();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let n = self.selected.len();
             let mut picked: Vec<PathBuf> = self.selected.iter().cloned().collect();
             picked.sort();
@@ -684,7 +710,9 @@ impl App {
             // Never the music folder itself, and nothing inside a folder that's also going.
             let trash: Vec<PathBuf> =
                 picked.iter().filter(|p| **p != dir && !picked.iter().any(|q| q != *p && p.starts_with(q))).cloned().collect();
-            if ui.add_enabled(!trash.is_empty(), egui::Button::new(format!("Move to Trash ({})", trash.len()))).clicked() {
+            let clicked =
+                ui.add_enabled(!trash.is_empty(), egui::Button::new(format!("Move to Trash ({})", trash.len()))).on_hover_text("Delete");
+            if (clicked.clicked() || std::mem::take(&mut self.trash_now)) && !trash.is_empty() {
                 self.trash_confirm = Some(trash);
             }
             if ui.add_enabled(n > 0, egui::Button::new("Clear selection")).clicked() {
@@ -710,8 +738,15 @@ impl App {
             ui.colored_label(ui.visuals().error_fg_color, format!("Music folder not found: {}. Set it in Settings.", dir.display()));
             return;
         }
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.library_filter).hint_text("Filter by artist, album or song").desired_width(320.0));
+        ui.horizontal_wrapped(|ui| {
+            let filter = ui.add(
+                egui::TextEdit::singleline(&mut self.library_filter)
+                    .hint_text("Filter by artist, album or song (Ctrl+F)")
+                    .desired_width(320.0),
+            );
+            if std::mem::take(&mut self.focus_filter) {
+                filter.request_focus();
+            }
             if !self.library_filter.is_empty() && ui.small_button("✖").on_hover_text("Clear the filter").clicked() {
                 self.library_filter.clear();
             }
@@ -807,6 +842,111 @@ impl App {
         };
         if let Err(e) = result {
             self.status = Some(e);
+        }
+    }
+
+    /// Keyboard shortcuts. Single keys (Space, Delete, ?) only count when no text box has the cursor.
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        use egui::{Key, KeyboardShortcut, Modifiers};
+        let ctrl = |key| KeyboardShortcut::new(Modifiers::COMMAND, key);
+        let typing = ctx.egui_wants_keyboard_input();
+        let hovered = self.preview.hovered.take();
+        let mut toggle_preview = None;
+        ctx.input_mut(|i| {
+            if i.consume_shortcut(&ctrl(Key::Num1)) {
+                self.tab = Tab::Library;
+            }
+            if i.consume_shortcut(&ctrl(Key::Num2)) {
+                self.tab = Tab::Search;
+            }
+            if i.consume_shortcut(&ctrl(Key::Comma)) {
+                self.tab = Tab::Settings;
+            }
+            if i.consume_shortcut(&ctrl(Key::F)) {
+                match self.tab {
+                    Tab::Search => self.autofocus = true,
+                    _ => {
+                        self.tab = Tab::Library;
+                        self.focus_filter = true;
+                    }
+                }
+            }
+            if i.consume_shortcut(&ctrl(Key::D)) && self.tab == Tab::Search {
+                self.download_now = true;
+            }
+            if i.consume_key(Modifiers::NONE, Key::F5) {
+                self.rescan_requested = true;
+            }
+            if i.consume_key(Modifiers::NONE, Key::F1) {
+                self.show_keys = true;
+            }
+            if typing || self.confirm.is_some() || self.trash_confirm.is_some() {
+                return;
+            }
+            if i.consume_key(Modifiers::NONE, Key::Questionmark) || i.consume_key(Modifiers::SHIFT, Key::Slash) {
+                self.show_keys = true;
+            }
+            if i.consume_key(Modifiers::NONE, Key::Delete) && self.tab == Tab::Library {
+                self.trash_now = true;
+            }
+            if i.consume_key(Modifiers::NONE, Key::Space) {
+                toggle_preview = Some(hovered.clone());
+            }
+            if i.consume_key(Modifiers::NONE, Key::Escape) {
+                self.preview.stop();
+                self.library_filter.clear();
+            }
+        });
+        // Space previews the result under the pointer, or stops the one playing.
+        match toggle_preview {
+            Some(Some(id)) => {
+                if let Err(e) = self.preview.toggle(id) {
+                    self.status = Some(e);
+                }
+            }
+            Some(None) => self.preview.stop(),
+            None => {}
+        }
+        if std::mem::take(&mut self.rescan_requested) {
+            self.rescan(ctx);
+        }
+    }
+
+    fn keys_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_keys {
+            return;
+        }
+        const KEYS: [(&str, &str); 12] = [
+            ("Ctrl+1 / Ctrl+2", "Library / Search"),
+            ("Ctrl+,", "Settings"),
+            ("Ctrl+F", "Search box, or the Library filter"),
+            ("Enter", "Search"),
+            ("Space", "Preview the result under the pointer, or stop it"),
+            ("Ctrl+D", "Download selected"),
+            ("Delete", "Move the selected songs and folders to the Trash"),
+            ("F5", "Rescan the music folder"),
+            ("Esc", "Stop the preview and clear the Library filter"),
+            ("Ctrl + / Ctrl − / Ctrl 0", "Bigger, smaller, normal text"),
+            ("? or F1", "This list"),
+            ("Double-click a song", "Play it (right-click for more)"),
+        ];
+        let modal = egui::Modal::new(egui::Id::new("keys")).show(ctx, |ui| {
+            ui.heading("Keyboard shortcuts");
+            ui.add_space(6.0);
+            egui::Grid::new("keys-grid").num_columns(2).spacing([24.0, 6.0]).show(ui, |ui| {
+                for (keys, what) in KEYS {
+                    ui.strong(keys);
+                    ui.label(what);
+                    ui.end_row();
+                }
+            });
+            ui.add_space(8.0);
+            if ui.button("Close").clicked() {
+                self.show_keys = false;
+            }
+        });
+        if modal.should_close() {
+            self.show_keys = false;
         }
     }
 
@@ -936,6 +1076,11 @@ impl App {
                     }
                 }
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("⌨ Shortcuts").on_hover_text("? or F1").clicked() {
+                    self.show_keys = true;
+                }
+            });
         });
     }
 
@@ -1117,35 +1262,42 @@ impl App {
 
 fn song_row(
     ui: &mut egui::Ui,
-    row: &mut Row,
+    row_: &mut Row,
     jobs: &HashMap<String, Job>,
     logged: &HashSet<String>,
     scan: &Option<Scan>,
     wants_confirm: &mut Option<Song>,
     preview: &mut Preview,
 ) {
-    let have = in_library(logged, scan, &row.song);
-    ui.horizontal(|ui| {
-        if ui.checkbox(&mut row.checked, "").changed() && row.checked && have {
-            row.checked = false;
-            *wants_confirm = Some(row.song.clone());
-        }
-        if preview.mpv {
-            let playing = preview.current() == Some(row.song.id.as_str());
-            let (icon, tip) = if playing { ("⏹", "Stop the preview") } else { ("▶", "Preview: listen without downloading") };
-            if ui.button(icon).on_hover_text(tip).clicked() {
-                preview.clicked = Some(row.song.id.clone());
+    let have = in_library(logged, scan, &row_.song);
+    let id = row_.song.id.clone();
+    let hovered = row(
+        ui,
+        |ui| job_status(ui, jobs.get(&id), have),
+        |ui| {
+            if ui.checkbox(&mut row_.checked, "").changed() && row_.checked && have {
+                row_.checked = false;
+                *wants_confirm = Some(row_.song.clone());
             }
-        }
-        ui.vertical(|ui| {
-            ui.strong(&row.song.title);
-            let album = if row.song.album.is_empty() { String::new() } else { format!(" · {}", row.song.album) };
-            ui.label(format!("{}{album} · {}", row.song.artists, row.song.duration));
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            job_status(ui, jobs.get(&row.song.id), have);
-        });
-    });
+            if preview.mpv {
+                let playing = preview.current() == Some(id.as_str());
+                let (icon, tip) =
+                    if playing { ("⏹", "Stop the preview (Space)") } else { ("▶", "Preview: listen without downloading (Space)") };
+                if ui.button(icon).on_hover_text(tip).clicked() {
+                    preview.clicked = Some(id.clone());
+                }
+            }
+            cover(ui, &row_.song.thumb, 40.0);
+            ui.vertical(|ui| {
+                fit(ui, egui::RichText::new(&row_.song.title).strong());
+                let album = if row_.song.album.is_empty() { String::new() } else { format!(" · {}", row_.song.album) };
+                fit(ui, format!("{}{album} · {}", row_.song.artists, row_.song.duration));
+            });
+        },
+    );
+    if hovered {
+        preview.hovered = Some(id);
+    }
 }
 
 fn job_status(ui: &mut egui::Ui, job: Option<&Job>, have: bool) {
@@ -1179,6 +1331,36 @@ fn job_status(ui: &mut egui::Ui, job: Option<&Job>, have: bool) {
             ui.colored_label(ui.visuals().hyperlink_color, "✔ In library");
         }
         None => {}
+    }
+}
+
+/// A row with `right` drawn against the right edge first and `left` in the space left over, so a
+/// long name is cut short ("…") instead of running into the details. Returns whether the pointer
+/// is over the row.
+fn row(ui: &mut egui::Ui, right: impl FnOnce(&mut egui::Ui), left: impl FnOnce(&mut egui::Ui)) -> bool {
+    // The outer horizontal keeps the row as tall as its content; a bare right-to-left layout
+    // would take all the height left in the window.
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            right(ui);
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), left);
+        });
+    })
+    .response
+    .contains_pointer()
+}
+
+/// A label that ends in "…" when it doesn't fit; egui shows the full text on hover then.
+fn fit(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
+    ui.add(egui::Label::new(text).truncate())
+}
+
+/// A square cover from a URL, or blank space of the same size so rows line up.
+fn cover(ui: &mut egui::Ui, url: &str, size: f32) {
+    if url.starts_with("https://") {
+        ui.add(egui::Image::new(url).fit_to_exact_size(egui::vec2(size, size)).corner_radius(3.0));
+    } else {
+        ui.add_space(size + ui.spacing().item_spacing.x);
     }
 }
 
@@ -1216,40 +1398,45 @@ fn select_box(ui: &mut egui::Ui, path: &PathBuf, selected: &mut HashSet<PathBuf>
 
 /// One song in the Library: tick box, name, details; double-click plays, right-click opens a menu.
 fn file_row(ui: &mut egui::Ui, file: &PathBuf, label: &str, tree: &mut Tree) {
+    let details = match tree.details.get(file) {
+        Some(info) => info.describe(),
+        None => {
+            if !tree.probing.contains(file) {
+                tree.wanted.push(file.clone());
+            }
+            String::new()
+        }
+    };
     let stems = tree.stems;
     let folder = file.parent().map(PathBuf::from).unwrap_or_default();
-    let action = &mut tree.action;
-    ui.horizontal(|ui| {
-        select_box(ui, file, tree.selected, "");
-        let row = ui.add(egui::Label::new(format!("♪  {label}")).sense(egui::Sense::click()));
-        if row.double_clicked() {
-            *action = Some(LibraryAction::Play(file.clone()));
-        }
-        row.on_hover_text("Double-click to play, right-click for more").context_menu(|ui| {
-            if ui.button("Play").clicked() {
+    let (selected, action) = (&mut *tree.selected, &mut tree.action);
+    row(
+        ui,
+        |ui| {
+            ui.weak(details);
+        },
+        |ui| {
+            select_box(ui, file, selected, "");
+            let name = fit(ui, format!("♪  {label}")).interact(egui::Sense::click());
+            if name.double_clicked() {
                 *action = Some(LibraryAction::Play(file.clone()));
-                ui.close();
             }
-            if stems && ui.button("Open in Stems").clicked() {
-                *action = Some(LibraryAction::Stems(file.clone()));
-                ui.close();
-            }
-            if ui.button("Show in file manager").clicked() {
-                *action = Some(LibraryAction::Reveal(folder.clone()));
-                ui.close();
-            }
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match tree.details.get(file) {
-            Some(info) => {
-                ui.weak(info.describe());
-            }
-            None => {
-                if !tree.probing.contains(file) {
-                    tree.wanted.push(file.clone());
+            name.context_menu(|ui| {
+                if ui.button("Play").clicked() {
+                    *action = Some(LibraryAction::Play(file.clone()));
+                    ui.close();
                 }
-            }
-        });
-    });
+                if stems && ui.button("Open in Stems").clicked() {
+                    *action = Some(LibraryAction::Stems(file.clone()));
+                    ui.close();
+                }
+                if ui.button("Show in file manager").clicked() {
+                    *action = Some(LibraryAction::Reveal(folder.clone()));
+                    ui.close();
+                }
+            });
+        },
+    );
 }
 
 /// What the Library tree reads and fills in while it's drawn.
@@ -1301,6 +1488,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         self.theme.update(&ctx);
         self.zoom_keys(&ctx);
+        self.shortcuts(&ctx);
         self.preview.poll();
         while let Ok(msg) = self.rx.try_recv() {
             self.handle(&ctx, msg);
@@ -1357,6 +1545,7 @@ impl eframe::App for App {
         });
         self.confirm_dialog(&ctx);
         self.trash_dialog(&ctx);
+        self.keys_dialog(&ctx);
     }
 }
 

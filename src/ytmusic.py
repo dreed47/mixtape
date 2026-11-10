@@ -13,7 +13,16 @@ def names(item):
     return [a["name"] for a in item.get("artists") or [] if a.get("name")]
 
 
-def song(s, album=None, album_artists=()):
+def thumb(item, size=120):
+    """The smallest cover at least `size` pixels wide (they're square), or the biggest there is."""
+    covers = item.get("thumbnails") or []
+    fit = [t for t in covers if (t.get("width") or 0) >= size]
+    cover = fit[0] if fit else (covers[-1] if covers else None)
+    url = (cover or {}).get("url") or ""
+    return url if url.startswith("https://") else ""
+
+
+def song(s, album=None, album_artists=(), cover=""):
     artists = names(s) or list(album_artists)
     return {
         "id": s["videoId"],
@@ -23,6 +32,7 @@ def song(s, album=None, album_artists=()):
         "album": album if album is not None else (s.get("album") or {}).get("name") or "",
         "duration": s.get("duration") or s.get("length") or "",
         "track": s.get("trackNumber") if album is not None else None,
+        "thumb": thumb(s) or cover,
     }
 
 
@@ -33,6 +43,7 @@ def album_item(a, artist=""):
         "artists": ", ".join(names(a)) or artist,
         "year": str(a.get("year") or ""),
         "kind": a.get("type") or "",
+        "thumb": thumb(a),
     }
 
 
@@ -53,7 +64,8 @@ def search(query):
 
 def album_tracks(browse_id):
     a = yt.get_album(browse_id)
-    return [song(t, a.get("title") or "", names(a)) for t in a.get("tracks") or [] if t.get("videoId")]
+    cover = thumb(a)
+    return [song(t, a.get("title") or "", names(a), cover) for t in a.get("tracks") or [] if t.get("videoId")]
 
 
 def album_by_id(browse_id):
