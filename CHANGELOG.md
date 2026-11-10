@@ -6,6 +6,9 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 
 ## Unreleased
 
+- Code: `main.rs` is split into one file per part of the window, and window
+  tests (egui_kittest) cover Settings, the album download gate, the
+  "Download again?" question and the music folder's missing tick box.
 - On a drive with no Trash, **Move to Trash** (and the old copies **Fix tags**
   replaces) asks "Delete permanently?" instead of failing. Deleting never
   happens without that answer, and only inside the music folder.

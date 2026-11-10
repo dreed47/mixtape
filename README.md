@@ -166,11 +166,17 @@ but the **Update** button leaves the copy alone, so you update it with git.
 
 The code is in `src/`:
 
-- `main.rs`: the window and its three tabs
-- `backend.rs`: settings, search, downloads, the download log, and library
-  scanning
+- `main.rs`: the app's state, messages from background work, and the window
+- `search.rs`, `library.rs`, `settings.rs`: the three tabs
+- `downloads.rs`: the download queue and the Downloads panel
+- `chrome.rs`: the footer, setup notices and keyboard shortcuts
+- `widgets.rs`: small pieces of UI the tabs share
+- `backend.rs`: everything that isn't UI: settings, search, downloads, the
+  library scan, tags and duplicates
 - `theme.rs`: follows the Omarchy theme
 - `ytmusic.py`: the search helper that calls ytmusicapi
+- `ui_tests.rs`: window tests that draw a tab headless with egui_kittest and
+  click through it
 
 ## Legal
 
