@@ -56,6 +56,8 @@ struct App {
     status: Option<String>,
 
     query: String,
+    /// Put the cursor in the search box when the window opens.
+    autofocus: bool,
     search_gen: u64,
     searching: bool,
     search_error: Option<String>,
@@ -94,6 +96,7 @@ impl App {
             settings,
             status: None,
             query: String::new(),
+            autofocus: true,
             search_gen: 0,
             searching: false,
             search_error: None,
@@ -268,6 +271,9 @@ impl App {
                     .hint_text("Artist, song or album (spelling doesn't need to be exact)")
                     .desired_width(ui.available_width() - 80.0),
             );
+            if std::mem::take(&mut self.autofocus) {
+                edit.request_focus();
+            }
             let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if (ui.button("Search").clicked() || enter) && !self.query.trim().is_empty() {
                 self.search_gen += 1;

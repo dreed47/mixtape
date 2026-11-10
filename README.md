@@ -5,6 +5,8 @@ MP3 into an `Artist/Album/` folder structure, and opens folders of your music
 in the player you choose. It follows the [Omarchy](https://omarchy.org) theme
 when Omarchy is installed and works on any Linux desktop otherwise.
 
+![Mixtape searching for Queen, with an album open and two songs downloading](docs/screenshot.png)
+
 ## Features
 
 - **Search** by artist, song, album, or a mix. Partial and misspelled searches
@@ -49,7 +51,7 @@ sudo pacman -S rust uv yt-dlp ffmpeg
 ```bash
 git clone https://github.com/dreed47/mixtape.git
 cd mixtape
-./install.sh
+bin/install.sh
 ```
 
 This builds Mixtape, installs the `mixtape` binary to `~/.local/bin`, and adds
@@ -60,7 +62,7 @@ Mixtape to your app launcher. Make sure `~/.local/bin` is on your `PATH`.
 From the folder you cloned:
 
 ```bash
-./update.sh
+bin/update.sh
 ```
 
 This pulls the latest version from GitHub and reinstalls it. Restart Mixtape
@@ -69,7 +71,7 @@ afterwards.
 ## Uninstall
 
 ```bash
-./uninstall.sh
+bin/uninstall.sh
 ```
 
 This removes the app and its launcher entry. Your music, settings, and
