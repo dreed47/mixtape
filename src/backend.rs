@@ -34,12 +34,26 @@ pub struct Album {
     pub title: String,
     pub artists: String,
     pub year: String,
+    /// "Album", "Single" or "EP".
+    #[serde(default)]
+    pub kind: String,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct Artist {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Deserialize)]
 pub struct SearchResult {
     pub songs: Vec<Song>,
     pub albums: Vec<Album>,
+    #[serde(default)]
+    pub artists: Vec<Artist>,
+    /// Set for an artist's page or a playlist: its name.
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 fn home() -> PathBuf {
@@ -216,8 +230,23 @@ fn ytmusic(mode: &str, arg: &str) -> Result<String, String> {
     run(Command::new("uv").args(["run", "-q", "--no-project", "--with", "ytmusicapi", "python", "-I", "-c", YTMUSIC_PY, mode, arg]))
 }
 
+/// A search, or a pasted YouTube / YouTube Music link to a song, album, playlist or artist.
 pub fn search(query: &str) -> Result<SearchResult, String> {
-    serde_json::from_str(&ytmusic("search", query)?).map_err(|e| e.to_string())
+    let mode = if is_link(query) { "link" } else { "search" };
+    serde_json::from_str(&ytmusic(mode, query)?).map_err(|e| e.to_string())
+}
+
+pub fn is_link(query: &str) -> bool {
+    let q = query.trim();
+    q.starts_with("https://") || q.starts_with("http://")
+}
+
+/// An artist's albums, singles and top songs.
+pub fn artist(channel_id: &str) -> Result<SearchResult, String> {
+    if !safe_id(channel_id, 64) {
+        return Err(format!("bad artist id {channel_id:?}"));
+    }
+    serde_json::from_str(&ytmusic("artist", channel_id)?).map_err(|e| e.to_string())
 }
 
 pub fn album_tracks(browse_id: &str) -> Result<Vec<Song>, String> {
@@ -517,17 +546,34 @@ pub struct Scan {
     /// artist|title keys for every audio file, from its path.
     pub keys: HashSet<String>,
     pub root: Folder,
-    pub songs: usize,
+    /// Every song with when it was last changed, newest first.
+    pub all: Vec<(PathBuf, std::time::SystemTime)>,
+}
+
+impl Scan {
+    /// Songs whose path below the music folder contains every word of `query`, ignoring case.
+    pub fn matching(&self, query: &str) -> Vec<&PathBuf> {
+        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        self.all
+            .iter()
+            .map(|(p, _)| p)
+            .filter(|p| {
+                let text = p.strip_prefix(&self.root.path).unwrap_or(p).to_string_lossy().to_lowercase();
+                words.iter().all(|w| text.contains(w))
+            })
+            .collect()
+    }
 }
 
 /// Walks the music folder. shortcut: songs are matched by path (Artist/Album/Title, Artist/Title or "Artist - Title"), not by reading tags; read ID3 tags if files from other tools are named differently.
 pub fn scan(dir: &Path) -> Scan {
-    let (mut keys, mut songs) = (HashSet::new(), 0);
-    let root = walk(dir, dir.display().to_string(), &mut keys, &mut songs);
-    Scan { keys, root, songs }
+    let (mut keys, mut all) = (HashSet::new(), Vec::new());
+    let root = walk(dir, dir.display().to_string(), &mut keys, &mut all);
+    all.sort_by(|a, b| b.1.cmp(&a.1));
+    Scan { keys, root, all }
 }
 
-fn walk(dir: &Path, name: String, keys: &mut HashSet<String>, songs: &mut usize) -> Folder {
+fn walk(dir: &Path, name: String, keys: &mut HashSet<String>, songs: &mut Vec<(PathBuf, std::time::SystemTime)>) -> Folder {
     let mut folder = Folder { name, path: dir.to_path_buf(), children: vec![], files: vec![] };
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let path = entry.path();
@@ -540,7 +586,8 @@ fn walk(dir: &Path, name: String, keys: &mut HashSet<String>, songs: &mut usize)
         if kind.is_dir() {
             folder.children.push(walk(&path, name, keys, songs));
         } else if path.extension().is_some_and(|x| AUDIO_EXTS.iter().any(|a| x.eq_ignore_ascii_case(a))) {
-            *songs += 1;
+            let changed = entry.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+            songs.push((path.clone(), changed));
             folder.files.push(path.clone());
             let stem = path.file_stem().unwrap_or_default().to_string_lossy();
             let title = stem.trim_start_matches(|c: char| c.is_ascii_digit() || " -.".contains(c)); // "01 - Title"
@@ -665,7 +712,11 @@ mod tests {
         std::fs::write(dir.join("notes.txt"), "").unwrap();
         let s = scan(&dir);
         std::fs::remove_dir_all(&dir).unwrap();
-        assert_eq!(s.songs, 2);
+        assert_eq!(s.all.len(), 2);
+        assert_eq!(s.matching("rick NEVER").len(), 1);
+        assert_eq!(s.matching("thunder").len(), 1);
+        assert_eq!(s.matching("rick thunder").len(), 0);
+        assert_eq!(s.matching("").len(), 2);
         assert!(s.keys.contains(&key("rick astley", "Never Gonna Give You Up")));
         assert!(s.keys.contains(&key("AC/DC", "thunderstruck")));
         assert_eq!(s.root.children[0].name, "Rick Astley");

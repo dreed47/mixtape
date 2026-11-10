@@ -4,6 +4,16 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 `Cargo.toml`, shows in the window's footer, and each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- Library: a filter box (every word must match the artist, album or song
+  name) and a **Recently added** view of the newest 200 songs.
+- Search: paste a YouTube or YouTube Music link to a song, album, playlist or
+  artist. Artists appear in results; **Albums and singles ›** lists all of
+  theirs, with **Select all**. A playlist page has **Select all songs**.
+- Albums show their type (Album, Single, EP). Track lists load three at a
+  time.
+
 ## 0.3.0
 
 - Album downloads keep album order: files start with the track number

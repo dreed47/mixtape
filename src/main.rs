@@ -3,7 +3,7 @@
 mod backend;
 mod theme;
 
-use backend::{Album, Folder, Format, Scan, SearchResult, Settings, Song};
+use backend::{Album, Artist, Folder, Format, Scan, SearchResult, Settings, Song};
 use eframe::egui;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -132,6 +132,13 @@ struct App {
     search_error: Option<String>,
     songs: Vec<Row>,
     albums: Vec<AlbumRow>,
+    artists: Vec<Artist>,
+    /// The artist or playlist the results come from.
+    page_title: Option<String>,
+    /// Album track lists being fetched; a few at a time so "Select all" on a big artist doesn't start dozens.
+    album_loads: usize,
+    library_filter: String,
+    recent: bool,
     confirm: Option<Song>,
 
     jobs: HashMap<String, Job>,
@@ -183,6 +190,11 @@ impl App {
             search_error: None,
             songs: vec![],
             albums: vec![],
+            artists: vec![],
+            page_title: None,
+            album_loads: 0,
+            library_filter: String::new(),
+            recent: false,
             confirm: None,
             jobs: HashMap::new(),
             queue: VecDeque::new(),
@@ -240,12 +252,15 @@ impl App {
                             .into_iter()
                             .map(|album| AlbumRow { album, open: false, checked: false, loading: false, error: None, tracks: None })
                             .collect();
+                        self.artists = r.artists;
+                        self.page_title = r.title;
                     }
                     Err(e) => self.search_error = Some(e),
                 }
             }
             Msg::Search(..) => {} // results of an older search
             Msg::Album(id, result) => {
+                self.album_loads = self.album_loads.saturating_sub(1);
                 let (logged, scan) = (&self.logged, &self.scan);
                 if let Some(a) = self.albums.iter_mut().find(|a| a.album.id == id) {
                     a.loading = false;
@@ -384,7 +399,7 @@ impl App {
         ui.horizontal(|ui| {
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut self.query)
-                    .hint_text("Artist, song or album (spelling doesn't need to be exact)")
+                    .hint_text("Artist, song or album, or paste a YouTube link")
                     .desired_width(ui.available_width() - 80.0),
             );
             if std::mem::take(&mut self.autofocus) {
@@ -428,9 +443,33 @@ impl App {
         ui.separator();
 
         let mut wants_confirm = None;
-        let mut load_album = None;
-        let Self { songs, albums, jobs, logged, scan, preview, .. } = self;
+        let mut load_album = Vec::new();
+        let mut open_artist = None;
+        let Self { songs, albums, artists, page_title, jobs, logged, scan, preview, .. } = self;
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            if let Some(title) = page_title {
+                ui.horizontal(|ui| {
+                    ui.heading(title.as_str());
+                    if !albums.is_empty() && ui.button(format!("Select all {} albums and singles", albums.len())).clicked() {
+                        albums.iter_mut().for_each(|a| a.checked = true);
+                    } else if albums.is_empty() && !songs.is_empty() && ui.button(format!("Select all {} songs", songs.len())).clicked() {
+                        songs.iter_mut().filter(|r| !in_library(logged, scan, &r.song)).for_each(|r| r.checked = true);
+                    }
+                });
+                ui.add_space(4.0);
+            }
+            if !artists.is_empty() {
+                ui.heading("Artists");
+                for a in artists.iter() {
+                    ui.horizontal(|ui| {
+                        ui.strong(&a.name);
+                        if ui.button("Albums and singles ›").clicked() {
+                            open_artist = Some(a.id.clone());
+                        }
+                    });
+                }
+                ui.add_space(8.0);
+            }
             if !albums.is_empty() {
                 ui.heading("Albums");
                 for a in albums.iter_mut() {
@@ -448,15 +487,14 @@ impl App {
                         }
                         ui.vertical(|ui| {
                             ui.strong(&a.album.title);
-                            ui.label(format!("{}  {}", a.album.artists, a.album.year));
+                            ui.label(format!("{}  ·  {} {}", a.album.artists, a.album.kind, a.album.year));
                         });
                         if a.loading {
                             ui.spinner();
                         }
                     });
                     if (a.open || a.checked) && a.tracks.is_none() && !a.loading && a.error.is_none() {
-                        a.loading = true;
-                        load_album = Some(a.album.id.clone());
+                        load_album.push(a.album.id.clone());
                     }
                     if let Some(e) = &a.error {
                         ui.colored_label(ui.visuals().error_fg_color, e);
@@ -488,11 +526,22 @@ impl App {
         if let Some(song) = wants_confirm {
             self.confirm = Some(song);
         }
-        if let Some(id) = load_album {
+        for id in load_album.into_iter().take(3usize.saturating_sub(self.album_loads)) {
+            if let Some(a) = self.albums.iter_mut().find(|a| a.album.id == id) {
+                a.loading = true;
+            }
+            self.album_loads += 1;
             self.spawn(ui.ctx(), move |_| {
                 let r = backend::album_tracks(&id);
                 Msg::Album(id, r)
             });
+        }
+        if let Some(id) = open_artist {
+            self.search_gen += 1;
+            self.searching = true;
+            self.search_error = None;
+            let generation = self.search_gen;
+            self.spawn(ui.ctx(), move |_| Msg::Search(generation, backend::artist(&id)));
         }
     }
 
@@ -554,7 +603,7 @@ impl App {
                 ui.spinner();
             }
             if let Some(scan) = &self.scan {
-                ui.label(format!("{} songs", scan.songs));
+                ui.label(format!("{} songs", scan.all.len()));
             }
         });
         ui.separator();
@@ -562,6 +611,15 @@ impl App {
             ui.colored_label(ui.visuals().error_fg_color, format!("Music folder not found: {}. Set it in Settings.", dir.display()));
             return;
         }
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.library_filter).hint_text("Filter by artist, album or song").desired_width(320.0));
+            if !self.library_filter.is_empty() && ui.small_button("✖").on_hover_text("Clear the filter").clicked() {
+                self.library_filter.clear();
+            }
+            ui.separator();
+            ui.selectable_value(&mut self.recent, false, "Folders");
+            ui.selectable_value(&mut self.recent, true, "Recently added");
+        });
         let Some(scan) = &self.scan else { return };
         let mut tree = Tree {
             selected: &mut self.selected,
@@ -571,7 +629,32 @@ impl App {
             probing: &self.probing,
             wanted: vec![],
         };
-        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| folder_row(ui, &scan.root, &mut tree, true));
+        let filter = self.library_filter.trim();
+        let flat: Option<Vec<&PathBuf>> = if !filter.is_empty() {
+            Some(scan.matching(filter))
+        } else if self.recent {
+            Some(scan.all.iter().map(|(p, _)| p).take(200).collect())
+        } else {
+            None
+        };
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match &flat {
+            None => folder_row(ui, &scan.root, &mut tree, true),
+            Some(files) if files.is_empty() => {
+                ui.weak("No songs match.");
+            }
+            Some(files) => {
+                const MAX: usize = 500;
+                for file in files.iter().take(MAX) {
+                    // "Queen / Greatest Hits / Bohemian Rhapsody"
+                    let shown = file.strip_prefix(&scan.root.path).unwrap_or(file).with_extension("");
+                    let label = shown.iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>().join(" / ");
+                    file_row(ui, file, &label, &mut tree);
+                }
+                if files.len() > MAX {
+                    ui.weak(format!("…and {} more. Type more of the name to narrow it down.", files.len() - MAX));
+                }
+            }
+        });
         let (action, wanted) = (tree.action, tree.wanted);
         if !wanted.is_empty() {
             self.probing.extend(wanted.iter().cloned());
@@ -866,6 +949,44 @@ fn select_box(ui: &mut egui::Ui, path: &PathBuf, selected: &mut HashSet<PathBuf>
     response
 }
 
+/// One song in the Library: tick box, name, details; double-click plays, right-click opens a menu.
+fn file_row(ui: &mut egui::Ui, file: &PathBuf, label: &str, tree: &mut Tree) {
+    let stems = tree.stems;
+    let folder = file.parent().map(PathBuf::from).unwrap_or_default();
+    let action = &mut tree.action;
+    ui.horizontal(|ui| {
+        select_box(ui, file, tree.selected, "");
+        let row = ui.add(egui::Label::new(format!("♪  {label}")).sense(egui::Sense::click()));
+        if row.double_clicked() {
+            *action = Some(LibraryAction::Play(file.clone()));
+        }
+        row.on_hover_text("Double-click to play, right-click for more").context_menu(|ui| {
+            if ui.button("Play").clicked() {
+                *action = Some(LibraryAction::Play(file.clone()));
+                ui.close();
+            }
+            if stems && ui.button("Open in Stems").clicked() {
+                *action = Some(LibraryAction::Stems(file.clone()));
+                ui.close();
+            }
+            if ui.button("Show in file manager").clicked() {
+                *action = Some(LibraryAction::Reveal(folder.clone()));
+                ui.close();
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match tree.details.get(file) {
+            Some(info) => {
+                ui.weak(info.describe());
+            }
+            None => {
+                if !tree.probing.contains(file) {
+                    tree.wanted.push(file.clone());
+                }
+            }
+        });
+    });
+}
+
 /// What the Library tree reads and fills in while it's drawn.
 struct Tree<'a> {
     selected: &'a mut HashSet<PathBuf>,
@@ -903,40 +1024,7 @@ fn folder_row(ui: &mut egui::Ui, folder: &Folder, tree: &mut Tree, default_open:
                 folder_row(ui, child, tree, false);
             }
             for file in &folder.files {
-                let name = file.file_stem().unwrap_or_default().to_string_lossy();
-                let stems = tree.stems;
-                let action = &mut tree.action;
-                ui.horizontal(|ui| {
-                    select_box(ui, file, tree.selected, "");
-                    let row = ui.add(egui::Label::new(format!("♪  {name}")).sense(egui::Sense::click()));
-                    if row.double_clicked() {
-                        *action = Some(LibraryAction::Play(file.clone()));
-                    }
-                    row.on_hover_text("Double-click to play, right-click for more").context_menu(|ui| {
-                        if ui.button("Play").clicked() {
-                            *action = Some(LibraryAction::Play(file.clone()));
-                            ui.close();
-                        }
-                        if stems && ui.button("Open in Stems").clicked() {
-                            *action = Some(LibraryAction::Stems(file.clone()));
-                            ui.close();
-                        }
-                        if ui.button("Show in file manager").clicked() {
-                            *action = Some(LibraryAction::Reveal(folder.path.clone()));
-                            ui.close();
-                        }
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match tree.details.get(file) {
-                        Some(info) => {
-                            ui.weak(info.describe());
-                        }
-                        None => {
-                            if !tree.probing.contains(file) {
-                                tree.wanted.push(file.clone());
-                            }
-                        }
-                    });
-                });
+                file_row(ui, file, &file.file_stem().unwrap_or_default().to_string_lossy(), tree);
             }
         });
 }

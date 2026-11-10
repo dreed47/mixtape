@@ -11,6 +11,10 @@ when Omarchy is installed and works on any Linux desktop otherwise.
 
 - **Search** by artist, song, album, or a mix. Partial and misspelled searches
   work, because YouTube Music does the matching.
+- **Paste a link** to a YouTube or YouTube Music song, album, playlist, or
+  artist instead of searching.
+- **Artists** show up in search results. **Albums and singles ›** lists
+  everything they've released, with a button to select it all.
 - **Albums** show up as their own rows. Open one to see its tracks, or tick it
   to select every track you don't already have.
 - **Preview** a result with its ▶ button to hear it without downloading
@@ -22,7 +26,8 @@ when Omarchy is installed and works on any Linux desktop otherwise.
   **In library**. Mixtape knows a song is in your library when it downloaded
   that song before, or when a file in your music folder matches its artist and
   title. Ticking one asks before downloading it again.
-- **Library.** Browse your music folder down to each song. Tick songs or
+- **Library.** Browse your music folder down to each song, filter it by
+  artist, album, or song name, or switch to **Recently added**. Tick songs or
   folders, then click **Play selected** to open them in your player, or
   **Move to Trash** to remove them (you can restore them from the Trash).
   Double-click a song to play it. Right-click a song to play it, open it in the
