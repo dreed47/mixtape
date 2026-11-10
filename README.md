@@ -13,6 +13,8 @@ when Omarchy is installed and works on any Linux desktop otherwise.
   work, because YouTube Music does the matching.
 - **Albums** show up as their own rows. Open one to see its tracks, or tick it
   to select every track you don't already have.
+- **Preview** a result with its ▶ button to hear it without downloading
+  (needs mpv).
 - **Download several songs at once.** Tick songs, then click
   **Download selected**. Two songs download at a time and the rest wait in a
   queue, each with a progress bar.
@@ -41,8 +43,10 @@ Without Premium that's Opus at about 130 kbps. With Premium it's AAC at
 | **MP3** (default) | Converted to MP3 at the highest VBR setting (V0). Plays on everything, but converting a lossy file can't add quality. |
 | **Original** | The audio exactly as YouTube sends it, with no conversion: `.opus`, or `.m4a` with Premium. Best quality at about half the size. Some car stereos and older devices can't play Opus. |
 
-Songs are saved as `<music folder>/<Artist>/<Album>/<Title>.<ext>` with the
-artist, album, and title tags set. MP3 files get the cover art embedded. In
+Songs are saved as `<music folder>/<Artist>/<Album>/<Title>.<ext>`. Songs
+downloaded from an album's track list start with their track number
+(`01 Title.mp3`) so players keep album order. Title, artist, album, and track
+number tags come from YouTube Music, and the cover art is cropped square. MP3 files get the cover art embedded. In
 Original format the cover is saved as `cover.jpg` in the album folder, which
 music players pick up.
 
@@ -83,14 +87,18 @@ Mixtape to your app launcher. Make sure `~/.local/bin` is on your `PATH`.
 
 ## Update
 
-From the folder you cloned:
+Mixtape checks GitHub for a newer release when it starts and once a day after
+that. When one is out, the footer shows it with an **Update** button. Click it
+to install the release, then click **Restart to finish**. You can turn the
+check off in **Settings**.
+
+To update from a terminal instead, run this from the folder you cloned:
 
 ```bash
 bin/update.sh
 ```
 
-This pulls the latest version from GitHub and reinstalls it. Restart Mixtape
-afterwards.
+Both install the newest tagged release, not unreleased work on `main`.
 
 ## Uninstall
 
@@ -107,6 +115,7 @@ download log stay where they are.
 | --- | --- |
 | `~/.config/mixtape/settings.json` | Music folder and player |
 | `~/.local/share/mixtape/downloads.tsv` | Log of songs Mixtape downloaded |
+| `~/.local/share/mixtape/source-dir` | The folder Mixtape was installed from, for **Update** |
 
 Mixtape respects `XDG_CONFIG_HOME` and `XDG_DATA_HOME`.
 
@@ -116,6 +125,10 @@ Mixtape respects `XDG_CONFIG_HOME` and `XDG_DATA_HOME`.
 cargo run          # run from source
 cargo test         # unit tests
 ```
+
+In a development copy, create an empty `.mixtape-dev` file in the repository
+folder (`touch .mixtape-dev`). The footer still says when a release is out,
+but the **Update** button leaves the copy alone, so you update it with git.
 
 The code is in `src/`:
 

@@ -21,6 +21,7 @@ def song(s, album=None, album_artists=()):
         "artists": ", ".join(artists),
         "album": album if album is not None else (s.get("album") or {}).get("name") or "",
         "duration": s.get("duration") or "",
+        "track": s.get("trackNumber") if album is not None else None,
     }
 
 

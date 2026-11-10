@@ -4,6 +4,28 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 `Cargo.toml`, shows in the window's footer, and each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- Album downloads keep album order: files start with the track number
+  (`01 Bohemian Rhapsody.mp3`) and get a track number tag.
+- Cover art is cropped to a square instead of a letterboxed video frame.
+- Title, artist and album tags come from YouTube Music's song data, so music
+  videos no longer get titles like "Artist - Song (Official Video)".
+- A ▶ button on each search result plays it through mpv without downloading;
+  ⏹ stops it. It shows when mpv is installed.
+- Songs opened in Amberol start playing. Amberol only loads them, so Mixtape
+  presses Play over MPRIS.
+- The footer says when a newer release is on GitHub and offers an **Update**
+  button that installs it, then **Restart to finish**. The check runs at
+  startup and once a day, and can be turned off in Settings.
+- `bin/update.sh` installs the newest tagged release instead of the newest
+  code on `main`.
+- Text uses the desktop's interface font (Adwaita Sans on Omarchy and GNOME)
+  and is about 20% larger. **Settings > Text size** (80% to 200%) and
+  Ctrl +, Ctrl −, Ctrl 0 change it, and the size is remembered.
+- The Library shows each song's format, bitrate, length, and file size, for
+  example `MP3 · 236 kbps · 3:34 · 7.6 MB`.
+
 ## 0.2.0
 
 - Library: tick songs as well as folders, **Move to Trash** (with a confirm

@@ -8,4 +8,8 @@ done
 cargo build --release
 install -Dm755 target/release/mixtape "$HOME/.local/bin/mixtape"
 install -Dm644 assets/mixtape.desktop "$HOME/.local/share/applications/mixtape.desktop"
+# Lets the Update button in Mixtape find this folder.
+data="${XDG_DATA_HOME:-$HOME/.local/share}/mixtape"
+mkdir -p "$data"
+pwd > "$data/source-dir"
 echo "Installed. Start Mixtape from the app launcher or run: mixtape"

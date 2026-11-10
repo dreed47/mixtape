@@ -18,7 +18,10 @@ enum Msg {
     Done(Song, Result<backend::Downloaded, String>),
     Scanned(Scan),
     Picked(Option<PathBuf>),
+    Release(Result<Option<backend::Version>, String>),
+    Updated(Result<(), String>),
     Trashed(Vec<PathBuf>, Result<(), String>),
+    Probed(Vec<(PathBuf, backend::AudioInfo)>),
 }
 
 /// What a click in the Library tree asks for.
@@ -27,6 +30,62 @@ enum LibraryAction {
     Stems(PathBuf),
     /// Open a folder in the file manager.
     Reveal(PathBuf),
+}
+
+/// The footer's update state.
+enum Update {
+    None,
+    Available(backend::Version),
+    Running(backend::Version),
+    /// Installed; restart to use it.
+    Done(backend::Version),
+    Failed(String),
+}
+
+/// Plays one search result at a time through mpv, without saving it.
+struct Preview {
+    mpv: bool,
+    playing: Option<(String, std::process::Child)>,
+    /// The ▶ or ⏹ clicked this frame.
+    clicked: Option<String>,
+}
+
+impl Preview {
+    fn current(&self) -> Option<&str> {
+        self.playing.as_ref().map(|(id, _)| id.as_str())
+    }
+
+    /// Starts this song, or stops it if it's the one playing.
+    fn toggle(&mut self, id: String) -> Result<(), String> {
+        let same = self.current() == Some(id.as_str());
+        self.stop();
+        if !same {
+            self.playing = Some((id.clone(), backend::preview(&id)?));
+        }
+        Ok(())
+    }
+
+    fn stop(&mut self) {
+        if let Some((_, mut child)) = self.playing.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    /// Forgets a preview that has played to the end.
+    fn poll(&mut self) {
+        if let Some((_, child)) = &mut self.playing {
+            if !matches!(child.try_wait(), Ok(None)) {
+                self.playing = None;
+            }
+        }
+    }
+}
+
+impl Drop for Preview {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 enum Job {
@@ -66,7 +125,7 @@ struct App {
     status: Option<String>,
 
     query: String,
-    /// Put the cursor in the search box when the window opens.
+    /// Put the cursor in the search box the first time the Search tab shows.
     autofocus: bool,
     search_gen: u64,
     searching: bool,
@@ -88,6 +147,13 @@ struct App {
     stems: bool,
     /// Selected songs and folders waiting on "Move to Trash?".
     trash_confirm: Option<Vec<PathBuf>>,
+    update: Update,
+    preview: Preview,
+    /// When GitHub was last asked for a newer release.
+    update_checked: Option<std::time::Instant>,
+    /// Format, bitrate, length and size of songs shown in the Library, read in the background.
+    details: HashMap<PathBuf, backend::AudioInfo>,
+    probing: HashSet<PathBuf>,
 
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
@@ -101,8 +167,11 @@ impl App {
     fn new(ctx: &egui::Context) -> Self {
         let (tx, rx) = channel();
         let settings = Settings::load();
+        theme::install_fonts(ctx);
+        ctx.options_mut(|o| o.zoom_with_keyboard = false); // handled in zoom_keys so the size is saved
+        ctx.set_zoom_factor(settings.text_scale.clamp(*backend::TEXT_SCALES.start(), *backend::TEXT_SCALES.end()));
         let mut app = Self {
-            tab: Tab::Search,
+            tab: Tab::Library,
             theme: theme::Theme::new(),
             draft: settings.clone(),
             settings,
@@ -125,6 +194,11 @@ impl App {
             selected: HashSet::new(),
             stems: backend::stems_installed(),
             trash_confirm: None,
+            update: Update::None,
+            preview: Preview { mpv: backend::mpv_installed(), playing: None, clicked: None },
+            update_checked: None,
+            details: HashMap::new(),
+            probing: HashSet::new(),
             tx,
             rx,
         };
@@ -210,6 +284,13 @@ impl App {
                 self.scanning = false;
                 self.selected.retain(|p| p.starts_with(&scan.root.path));
                 self.scan = Some(scan);
+                self.details.clear(); // files may have changed; read again when shown
+            }
+            Msg::Probed(found) => {
+                for (path, info) in found {
+                    self.probing.remove(&path);
+                    self.details.insert(path, info);
+                }
             }
             Msg::Trashed(paths, result) => {
                 match result.and_then(|_| backend::forget(&paths)) {
@@ -219,6 +300,19 @@ impl App {
                 self.logged = backend::read_log();
                 self.selected.clear();
                 self.rescan(ctx);
+            }
+            Msg::Release(Ok(Some(latest))) if latest > backend::current_version() => {
+                if !matches!(self.update, Update::Running(_) | Update::Done(_)) {
+                    self.update = Update::Available(latest);
+                }
+            }
+            Msg::Release(_) => {} // no newer release, or GitHub unreachable: say nothing
+            Msg::Updated(result) => {
+                self.update = match (result, &self.update) {
+                    (Ok(()), Update::Running(v)) => Update::Done(*v),
+                    (Err(e), _) => Update::Failed(e),
+                    (Ok(()), _) => Update::None,
+                };
             }
             Msg::Picked(dir) => self.draft.music_dir = dir.unwrap_or(self.draft.music_dir.clone()),
         }
@@ -335,7 +429,7 @@ impl App {
 
         let mut wants_confirm = None;
         let mut load_album = None;
-        let Self { songs, albums, jobs, logged, scan, .. } = self;
+        let Self { songs, albums, jobs, logged, scan, preview, .. } = self;
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             if !albums.is_empty() {
                 ui.heading("Albums");
@@ -371,7 +465,7 @@ impl App {
                         if let Some(tracks) = &mut a.tracks {
                             ui.indent(&a.album.id, |ui| {
                                 for row in tracks.iter_mut() {
-                                    song_row(ui, row, jobs, logged, scan, &mut wants_confirm);
+                                    song_row(ui, row, jobs, logged, scan, &mut wants_confirm, preview);
                                 }
                             });
                         }
@@ -382,10 +476,15 @@ impl App {
             if !songs.is_empty() {
                 ui.heading("Songs");
                 for row in songs.iter_mut() {
-                    song_row(ui, row, jobs, logged, scan, &mut wants_confirm);
+                    song_row(ui, row, jobs, logged, scan, &mut wants_confirm, preview);
                 }
             }
         });
+        if let Some(id) = self.preview.clicked.take() {
+            if let Err(e) = self.preview.toggle(id) {
+                self.status = Some(e);
+            }
+        }
         if let Some(song) = wants_confirm {
             self.confirm = Some(song);
         }
@@ -464,9 +563,20 @@ impl App {
             return;
         }
         let Some(scan) = &self.scan else { return };
-        let mut action = None;
-        let (selected, stems) = (&mut self.selected, self.stems);
-        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| folder_row(ui, &scan.root, selected, stems, &mut action, true));
+        let mut tree = Tree {
+            selected: &mut self.selected,
+            stems: self.stems,
+            action: None,
+            details: &self.details,
+            probing: &self.probing,
+            wanted: vec![],
+        };
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| folder_row(ui, &scan.root, &mut tree, true));
+        let (action, wanted) = (tree.action, tree.wanted);
+        if !wanted.is_empty() {
+            self.probing.extend(wanted.iter().cloned());
+            self.spawn(ui.ctx(), move |_| Msg::Probed(wanted.into_iter().map(|p| { let i = backend::probe(&p); (p, i) }).collect()));
+        }
         let result = match action {
             Some(LibraryAction::Play(song)) => backend::open_with(&self.settings.player, &[song]),
             Some(LibraryAction::Stems(song)) => backend::open_with(backend::STEMS, &[song]),
@@ -476,6 +586,79 @@ impl App {
         if let Err(e) = result {
             self.status = Some(e);
         }
+    }
+
+    /// Ctrl +, Ctrl − and Ctrl 0 change the text size and save it.
+    fn zoom_keys(&mut self, ctx: &egui::Context) {
+        use egui::gui_zoom::kb_shortcuts::*;
+        let step = ctx.input_mut(|i| {
+            if i.consume_shortcut(&ZOOM_IN) || i.consume_shortcut(&ZOOM_IN_SECONDARY) {
+                Some(0.1)
+            } else if i.consume_shortcut(&ZOOM_OUT) {
+                Some(-0.1)
+            } else if i.consume_shortcut(&ZOOM_RESET) {
+                Some(0.0)
+            } else {
+                None
+            }
+        });
+        let Some(step) = step else { return };
+        let (lo, hi) = (*backend::TEXT_SCALES.start(), *backend::TEXT_SCALES.end());
+        let scale = if step == 0.0 { 1.0 } else { ((self.settings.text_scale + step) * 10.0).round() / 10.0 };
+        self.settings.text_scale = scale.clamp(lo, hi);
+        self.draft.text_scale = self.settings.text_scale;
+        ctx.set_zoom_factor(self.settings.text_scale);
+        if let Err(e) = self.settings.save() {
+            self.status = Some(format!("Could not save settings: {e}"));
+        }
+    }
+
+    fn footer(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.weak(concat!("Mixtape ", env!("CARGO_PKG_VERSION")));
+            match &self.update {
+                Update::None => {}
+                Update::Available(v) => {
+                    let v = *v;
+                    ui.label(format!("· {} available", backend::version_text(v)));
+                    match backend::source() {
+                        backend::Source::Clone(dir) => {
+                            if ui.small_button("Update").clicked() {
+                                self.update = Update::Running(v);
+                                self.spawn(ui.ctx(), move |_| Msg::Updated(backend::self_update(&dir)));
+                            }
+                        }
+                        backend::Source::Development => {
+                            ui.weak("(development copy: update it with git)");
+                        }
+                        backend::Source::Unknown => {
+                            ui.weak("(run bin/update.sh in your Mixtape folder)");
+                        }
+                    }
+                }
+                Update::Running(v) => {
+                    ui.spinner();
+                    ui.label(format!("Updating to {}…", backend::version_text(*v)));
+                }
+                Update::Done(v) => {
+                    ui.label(format!("· {} installed", backend::version_text(*v)));
+                    let busy = self.running + self.queue.len() > 0;
+                    let restart = ui.add_enabled(!busy, egui::Button::new("Restart to finish").small());
+                    if restart.on_disabled_hover_text("Wait for the downloads to finish").clicked() {
+                        match backend::relaunch() {
+                            Ok(()) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
+                            Err(e) => self.status = Some(e),
+                        }
+                    }
+                }
+                Update::Failed(e) => {
+                    ui.colored_label(ui.visuals().error_fg_color, "· Update failed").on_hover_text(e);
+                    if ui.small_button("Dismiss").clicked() {
+                        self.update = Update::None;
+                    }
+                }
+            }
+        });
     }
 
     fn trash_dialog(&mut self, ctx: &egui::Context) {
@@ -555,6 +738,17 @@ impl App {
             });
             ui.end_row();
 
+            ui.label("Text size");
+            ui.horizontal(|ui| {
+                ui.add(egui::Slider::new(&mut self.draft.text_scale, backend::TEXT_SCALES).step_by(0.1).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+                ui.small("Ctrl + and Ctrl − work anywhere");
+            });
+            ui.end_row();
+
+            ui.label("Updates");
+            ui.checkbox(&mut self.draft.check_updates, "Check GitHub for a new version at startup and once a day");
+            ui.end_row();
+
             ui.label("Premium");
             ui.vertical(|ui| {
                 let browsers = backend::detected_browsers();
@@ -580,6 +774,7 @@ impl App {
         if ui.add_enabled(changed, egui::Button::new("Save")).clicked() {
             let folder_changed = self.draft.music_dir != self.settings.music_dir;
             self.settings = self.draft.clone();
+            ui.ctx().set_zoom_factor(self.settings.text_scale);
             self.status = self.settings.save().err().map(|e| format!("Could not save settings: {e}"));
             if folder_changed {
                 self.selected.clear();
@@ -596,12 +791,20 @@ fn song_row(
     logged: &HashSet<String>,
     scan: &Option<Scan>,
     wants_confirm: &mut Option<Song>,
+    preview: &mut Preview,
 ) {
     let have = in_library(logged, scan, &row.song);
     ui.horizontal(|ui| {
         if ui.checkbox(&mut row.checked, "").changed() && row.checked && have {
             row.checked = false;
             *wants_confirm = Some(row.song.clone());
+        }
+        if preview.mpv {
+            let playing = preview.current() == Some(row.song.id.as_str());
+            let (icon, tip) = if playing { ("⏹", "Stop the preview") } else { ("▶", "Preview: listen without downloading") };
+            if ui.button(icon).on_hover_text(tip).clicked() {
+                preview.clicked = Some(row.song.id.clone());
+            }
         }
         ui.vertical(|ui| {
             ui.strong(&row.song.title);
@@ -663,20 +866,24 @@ fn select_box(ui: &mut egui::Ui, path: &PathBuf, selected: &mut HashSet<PathBuf>
     response
 }
 
+/// What the Library tree reads and fills in while it's drawn.
+struct Tree<'a> {
+    selected: &'a mut HashSet<PathBuf>,
+    stems: bool,
+    action: Option<LibraryAction>,
+    details: &'a HashMap<PathBuf, backend::AudioInfo>,
+    probing: &'a HashSet<PathBuf>,
+    /// Shown songs whose details haven't been read yet.
+    wanted: Vec<PathBuf>,
+}
+
 /// One folder in the Library tree, then its subfolders and songs, each with a tick box.
 /// Double-click plays a song; right-click opens a menu.
-fn folder_row(
-    ui: &mut egui::Ui,
-    folder: &Folder,
-    selected: &mut HashSet<PathBuf>,
-    stems: bool,
-    action: &mut Option<LibraryAction>,
-    default_open: bool,
-) {
-    let header = |ui: &mut egui::Ui, selected: &mut HashSet<PathBuf>, action: &mut Option<LibraryAction>| {
-        select_box(ui, &folder.path, selected, &folder.name).context_menu(|ui| {
+fn folder_row(ui: &mut egui::Ui, folder: &Folder, tree: &mut Tree, default_open: bool) {
+    let header = |ui: &mut egui::Ui, tree: &mut Tree| {
+        select_box(ui, &folder.path, tree.selected, &folder.name).context_menu(|ui| {
             if ui.button("Open in file manager").clicked() {
-                *action = Some(LibraryAction::Reveal(folder.path.clone()));
+                tree.action = Some(LibraryAction::Reveal(folder.path.clone()));
                 ui.close();
             }
         });
@@ -684,21 +891,23 @@ fn folder_row(
     if folder.children.is_empty() && folder.files.is_empty() {
         ui.horizontal(|ui| {
             ui.add_space(ui.spacing().indent);
-            header(ui, selected, action);
+            header(ui, tree);
         });
         return;
     }
     let id = ui.make_persistent_id(&folder.path);
     egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, default_open)
-        .show_header(ui, |ui| header(ui, selected, action))
+        .show_header(ui, |ui| header(ui, tree))
         .body(|ui| {
             for child in &folder.children {
-                folder_row(ui, child, selected, stems, action, false);
+                folder_row(ui, child, tree, false);
             }
             for file in &folder.files {
                 let name = file.file_stem().unwrap_or_default().to_string_lossy();
+                let stems = tree.stems;
+                let action = &mut tree.action;
                 ui.horizontal(|ui| {
-                    select_box(ui, file, selected, "");
+                    select_box(ui, file, tree.selected, "");
                     let row = ui.add(egui::Label::new(format!("♪  {name}")).sense(egui::Sense::click()));
                     if row.double_clicked() {
                         *action = Some(LibraryAction::Play(file.clone()));
@@ -717,6 +926,16 @@ fn folder_row(
                             ui.close();
                         }
                     });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match tree.details.get(file) {
+                        Some(info) => {
+                            ui.weak(info.describe());
+                        }
+                        None => {
+                            if !tree.probing.contains(file) {
+                                tree.wanted.push(file.clone());
+                            }
+                        }
+                    });
                 });
             }
         });
@@ -726,22 +945,30 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.theme.update(&ctx);
+        self.zoom_keys(&ctx);
+        self.preview.poll();
         while let Ok(msg) = self.rx.try_recv() {
             self.handle(&ctx, msg);
         }
         self.start_downloads(&ctx);
-        egui::Panel::bottom("footer").show(ui, |ui| {
-            ui.weak(concat!("Mixtape ", env!("CARGO_PKG_VERSION")));
-        });
+        const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+        if self.settings.check_updates && self.update_checked.is_none_or(|t| t.elapsed() > DAY) {
+            self.update_checked = Some(std::time::Instant::now());
+            self.spawn(&ctx, |_| Msg::Release(backend::latest_release()));
+        }
+        egui::Panel::bottom("footer").show(ui, |ui| self.footer(ui));
         egui::Panel::bottom("downloads").resizable(true).default_size(180.0).min_size(80.0).show(ui, |ui| {
             ui.add_space(6.0);
             self.downloads_panel(ui);
         });
         egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Search, "Search");
                 ui.selectable_value(&mut self.tab, Tab::Library, "Library");
-                ui.selectable_value(&mut self.tab, Tab::Settings, "Settings");
+                ui.selectable_value(&mut self.tab, Tab::Search, "Search");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let gear = egui::RichText::new("⚙").size(20.0);
+                    ui.selectable_value(&mut self.tab, Tab::Settings, gear).on_hover_text("Settings");
+                });
             });
             if let Some(s) = self.status.clone() {
                 ui.horizontal(|ui| {

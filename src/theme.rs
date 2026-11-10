@@ -39,6 +39,46 @@ impl Theme {
     }
 }
 
+/// Uses the desktop's interface font (Adwaita Sans on GNOME and Omarchy) ahead of egui's
+/// own, which stays as the fallback for symbols, and sets larger text sizes than egui's.
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    if let Some(bytes) = desktop_font().and_then(|path| std::fs::read(path).ok()) {
+        fonts.font_data.insert("desktop".into(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
+        fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(0, "desktop".into());
+    }
+    ctx.set_fonts(fonts);
+    ctx.all_styles_mut(|style| {
+        use egui::{FontFamily::*, FontId, TextStyle};
+        style.text_styles = [
+            (TextStyle::Small, FontId::new(12.0, Proportional)),
+            (TextStyle::Body, FontId::new(15.0, Proportional)),
+            (TextStyle::Button, FontId::new(15.0, Proportional)),
+            (TextStyle::Heading, FontId::new(21.0, Proportional)),
+            (TextStyle::Monospace, FontId::new(14.0, Monospace)),
+        ]
+        .into();
+    });
+}
+
+/// The font file for the desktop's interface font, from GNOME's setting or fontconfig's sans-serif.
+fn desktop_font() -> Option<String> {
+    let setting = std::process::Command::new("gsettings").args(["get", "org.gnome.desktop.interface", "font-name"]).output().ok();
+    let family = setting.map(|o| font_family(&String::from_utf8_lossy(&o.stdout))).filter(|f| !f.is_empty()).unwrap_or("sans-serif".into());
+    let out = std::process::Command::new("fc-match").arg(&family).arg("--format=%{file}").output().ok()?;
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!path.is_empty()).then_some(path)
+}
+
+/// "'Adwaita Sans 11'" -> "Adwaita Sans"
+fn font_family(setting: &str) -> String {
+    let name = setting.trim().trim_matches('\'');
+    match name.rsplit_once(' ') {
+        Some((family, size)) if size.parse::<f32>().is_ok() => family.to_string(),
+        _ => name.to_string(),
+    }
+}
+
 fn hypr_rounding() -> u8 {
     let out = std::process::Command::new("hyprctl").args(["getoption", "decoration:rounding", "-j"]).output();
     out.ok()
@@ -99,6 +139,13 @@ fn visuals(toml: &str, radius: u8) -> Visuals {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reads_the_desktop_font_setting() {
+        assert_eq!(super::font_family("'Adwaita Sans 11'\n"), "Adwaita Sans");
+        assert_eq!(super::font_family("'Cantarell'"), "Cantarell");
+        assert_eq!(super::font_family(""), "");
+    }
+
     #[test]
     fn reads_omarchy_colors() {
         let toml = "mode = \"dark\"\naccent = \"#0A84FF\"\nbackground = \"#1E1E1E\"\n";
