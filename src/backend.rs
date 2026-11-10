@@ -104,6 +104,8 @@ pub struct Settings {
     pub cookies_browser: String,
     /// Ask GitHub for a newer release at startup and once a day.
     pub check_updates: bool,
+    /// A desktop notification when a batch of downloads finishes while Mixtape is in the background.
+    pub notify: bool,
     /// Size of text and controls, 1.0 = normal. Ctrl + and Ctrl − change it too.
     pub text_scale: f32,
 }
@@ -143,6 +145,7 @@ impl Default for Settings {
             format: Format::Mp3,
             cookies_browser: String::new(),
             check_updates: true,
+            notify: true,
             text_scale: 1.0,
         }
     }
@@ -181,7 +184,7 @@ pub struct Tool {
     fedora: &'static str,
 }
 
-pub const TOOLS: [Tool; 6] = [
+pub const TOOLS: [Tool; 7] = [
     Tool { bin: "uv", needed_for: "searching YouTube Music", required: true, arch: "uv", debian: None, fedora: "uv" },
     Tool { bin: "yt-dlp", needed_for: "downloading", required: true, arch: "yt-dlp", debian: Some("yt-dlp"), fedora: "yt-dlp" },
     Tool {
@@ -202,6 +205,14 @@ pub const TOOLS: [Tool; 6] = [
     },
     Tool { bin: "mpv", needed_for: "previews", required: false, arch: "mpv", debian: Some("mpv"), fedora: "mpv" },
     Tool { bin: "gio", needed_for: "Move to Trash", required: false, arch: "glib2", debian: Some("libglib2.0-bin"), fedora: "glib2" },
+    Tool {
+        bin: "notify-send",
+        needed_for: "desktop notifications",
+        required: false,
+        arch: "libnotify",
+        debian: Some("libnotify-bin"),
+        fedora: "libnotify",
+    },
 ];
 
 /// Tools that aren't installed, required ones first.
@@ -347,6 +358,14 @@ fn challenge_solver_hint_for(ytdlp: &Path, home: &Path, os_release: &str) -> Str
         _ if omarchy(os_release) => "omarchy-pkg-add yt-dlp-ejs".into(),
         Distro::Arch => "sudo pacman -S yt-dlp-ejs".into(),
         _ => "uv tool install --force 'yt-dlp[default]'".into(),
+    }
+}
+
+/// Shows a desktop notification (through notify-send; nothing happens without it).
+pub fn desktop_notification(title: &str, body: &str) {
+    let sent = Command::new("notify-send").args(["--app-name=Mixtape", "--icon=mixtape", title, body]).stderr(Stdio::null()).spawn();
+    if let Ok(mut child) = sent {
+        std::thread::spawn(move || child.wait());
     }
 }
 
@@ -1378,6 +1397,7 @@ mod tests {
     fn old_settings_files_still_load() {
         let s: Settings = serde_json::from_str(r#"{"music_dir":"/m","player":"vlc"}"#).unwrap();
         assert!(s.format == Format::Mp3 && s.cookies_browser.is_empty());
+        assert!(s.notify, "notifications are on unless turned off");
         let s: Settings = serde_json::from_str(r#"{"format":"original","cookies_browser":"firefox"}"#).unwrap();
         assert!(s.format == Format::Original && s.cookies_browser == "firefox");
     }

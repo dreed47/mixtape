@@ -465,10 +465,15 @@ impl App {
                 if self.queue.is_empty() && self.running == 0 {
                     let (ok, failed) = std::mem::take(&mut self.batch);
                     let songs = |n| if n == 1 { "1 song".to_string() } else { format!("{n} songs") };
-                    self.notify(match failed {
+                    let summary = match failed {
                         0 => format!("Downloaded {}", songs(ok)),
-                        _ => format!("Downloaded {}, {} failed (see Downloads)", songs(ok), failed),
-                    });
+                        _ => format!("Downloaded {}, {} failed", songs(ok), failed),
+                    };
+                    // Only worth a desktop notification when you're looking at something else.
+                    if self.settings.notify && !ctx.input(|i| i.focused) {
+                        backend::desktop_notification("Downloads finished", &summary);
+                    }
+                    self.notify(if failed > 0 { format!("{summary} (see Downloads)") } else { summary });
                     self.rescan(ctx);
                 }
             }
@@ -1421,8 +1426,11 @@ impl App {
     /// (or pick one with Browse), and the text size when you let go of the slider.
     fn settings_tab(&mut self, ui: &mut egui::Ui) {
         let before = self.settings.clone();
-        egui::Grid::new("settings").num_columns(2).spacing([12.0, 12.0]).show(ui, |ui| {
-            ui.label("Music folder");
+        ui.heading("Settings");
+        ui.weak("Changes are saved as you make them.");
+
+        section(ui, "Library");
+        setting(ui, "Music folder", |ui| {
             ui.horizontal(|ui| {
                 let mut text = self.draft.music_dir.display().to_string();
                 let edit = ui.add(egui::TextEdit::singleline(&mut text).desired_width(360.0));
@@ -1437,90 +1445,87 @@ impl App {
                     self.spawn(ui.ctx(), move |_| Msg::Picked(rfd::FileDialog::new().set_directory(start).pick_folder()));
                 }
             });
-            ui.end_row();
-
-            ui.label("Player");
-            ui.vertical(|ui| {
-                let players = backend::detected_players();
-                let current = players.iter().find(|p| p.1 == self.settings.player).map_or("Custom command", |p| p.0);
-                egui::ComboBox::from_id_salt("player").selected_text(current).show_ui(ui, |ui| {
-                    for (name, cmd) in &players {
-                        ui.selectable_value(&mut self.settings.player, cmd.to_string(), *name);
-                    }
-                    if ui.selectable_label(current == "Custom command", "Custom command").clicked() && current != "Custom command" {
-                        self.settings.player.clear();
-                    }
-                });
-                if current == "Custom command" {
-                    ui.add(egui::TextEdit::singleline(&mut self.settings.player).hint_text("e.g. strawberry").desired_width(360.0));
-                    ui.small("Mixtape adds the selected folders after the command.");
+            if self.draft.music_dir != self.settings.music_dir && !self.draft.music_dir.is_dir() {
+                ui.colored_label(ui.visuals().warn_fg_color, "That folder doesn't exist, so the music folder hasn't changed.");
+            } else {
+                hint(ui, "Where songs are saved, as Artist / Album / Song. A network share works too.");
+            }
+        });
+        setting(ui, "Player", |ui| {
+            let players = backend::detected_players();
+            let current = players.iter().find(|p| p.1 == self.settings.player).map_or("Custom command", |p| p.0);
+            egui::ComboBox::from_id_salt("player").selected_text(current).show_ui(ui, |ui| {
+                for (name, cmd) in &players {
+                    ui.selectable_value(&mut self.settings.player, cmd.to_string(), *name);
+                }
+                if ui.selectable_label(current == "Custom command", "Custom command").clicked() && current != "Custom command" {
+                    self.settings.player.clear();
                 }
             });
-            ui.end_row();
+            if current == "Custom command" {
+                ui.add(egui::TextEdit::singleline(&mut self.settings.player).hint_text("e.g. strawberry").desired_width(360.0));
+                hint(ui, "Mixtape adds the songs or folders after the command.");
+            } else {
+                hint(ui, "Plays songs and folders from the Library.");
+            }
+        });
 
-            ui.label("Format");
-            ui.vertical(|ui| {
-                ui.radio_value(&mut self.settings.format, Format::Mp3, "MP3: plays everywhere");
-                ui.radio_value(
-                    &mut self.settings.format,
-                    Format::Original,
-                    "Original: best quality, no conversion (Opus, or AAC with Premium)",
-                );
-                ui.small("Original files are about half the size. Some car stereos and older devices can't play Opus.");
-            });
-            ui.end_row();
-
-            ui.label("Text size");
-            ui.horizontal(|ui| {
-                let slider = ui.add(
-                    egui::Slider::new(&mut self.draft.text_scale, backend::TEXT_SCALES)
-                        .step_by(0.1)
-                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-                );
-                // Resizing mid-drag would move the slider out from under the pointer.
-                if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
-                    self.settings.text_scale = self.draft.text_scale;
-                    ui.ctx().set_zoom_factor(self.settings.text_scale);
-                }
-                ui.small("Ctrl + and Ctrl − work anywhere");
-            });
-            ui.end_row();
-
-            ui.label("Updates");
-            ui.checkbox(&mut self.settings.check_updates, "Check GitHub for a new version at startup and once a day");
-            ui.end_row();
-
-            ui.label("Premium");
-            ui.vertical(|ui| {
-                let browsers = backend::detected_browsers();
-                let mut premium = !self.settings.cookies_browser.is_empty();
-                if ui.add_enabled(!browsers.is_empty(), egui::Checkbox::new(&mut premium, "Use my YouTube Music Premium login")).changed() {
-                    self.settings.cookies_browser = if premium { browsers[0].1.to_string() } else { String::new() };
-                }
-                if premium {
+        section(ui, "Downloads");
+        setting(ui, "Format", |ui| {
+            ui.radio_value(&mut self.settings.format, Format::Mp3, "MP3");
+            hint(ui, "Plays everywhere. Converted, so slightly lower quality and about twice the size.");
+            ui.add_space(4.0);
+            ui.radio_value(&mut self.settings.format, Format::Original, "Original");
+            hint(ui, "Best quality, no conversion: Opus (or AAC with Premium). Some car stereos and older devices can't play Opus.");
+        });
+        setting(ui, "Premium", |ui| {
+            let browsers = backend::detected_browsers();
+            let mut premium = !self.settings.cookies_browser.is_empty();
+            if ui.add_enabled(!browsers.is_empty(), egui::Checkbox::new(&mut premium, "Use my YouTube Music Premium login")).changed() {
+                self.settings.cookies_browser = if premium { browsers[0].1.to_string() } else { String::new() };
+            }
+            if premium {
+                ui.horizontal(|ui| {
+                    ui.label("Signed in with");
                     let current = browsers.iter().find(|b| b.1 == self.settings.cookies_browser).map_or("Choose a browser", |b| b.0);
                     egui::ComboBox::from_id_salt("browser").selected_text(current).show_ui(ui, |ui| {
                         for (name, id) in &browsers {
                             ui.selectable_value(&mut self.settings.cookies_browser, id.to_string(), *name);
                         }
                     });
-                }
-                ui.small(
-                    "Premium gets 256 kbps AAC instead of 130 kbps. Sign in to music.youtube.com in that browser first. \
-                          Mixtape only passes the browser's name to yt-dlp, which reads the login on this computer.",
-                );
-            });
-            ui.end_row();
+                });
+            }
+            hint(
+                ui,
+                "Premium gets 256 kbps AAC instead of 130 kbps. Sign in to music.youtube.com in that browser first. \
+                 Mixtape only passes the browser's name to yt-dlp, which reads the login on this computer.",
+            );
         });
-        ui.add_space(12.0);
-        if self.draft.music_dir != self.settings.music_dir && !self.draft.music_dir.is_dir() {
-            ui.colored_label(ui.visuals().warn_fg_color, "That folder doesn't exist, so the music folder hasn't changed.");
-        }
-        ui.weak("Changes are saved automatically.");
-        ui.add_space(16.0);
-        ui.separator();
-        ui.heading("Dependencies");
-        ui.weak("Programs Mixtape runs. Point at one to see which copy it uses.");
+
+        section(ui, "App");
+        setting(ui, "Text size", |ui| {
+            let slider = ui.add(
+                egui::Slider::new(&mut self.draft.text_scale, backend::TEXT_SCALES)
+                    .step_by(0.1)
+                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+            );
+            // Resizing mid-drag would move the slider out from under the pointer.
+            if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                self.settings.text_scale = self.draft.text_scale;
+                ui.ctx().set_zoom_factor(self.settings.text_scale);
+            }
+            hint(ui, "Ctrl + and Ctrl − change it anywhere; Ctrl 0 resets it.");
+        });
+        setting(ui, "Updates", |ui| {
+            ui.checkbox(&mut self.settings.check_updates, "Check for a new version of Mixtape");
+            hint(ui, "Asks GitHub at startup and once a day.");
+        });
+        setting(ui, "Notifications", |ui| {
+            ui.checkbox(&mut self.settings.notify, "Tell me when downloads finish");
+            hint(ui, "A desktop notification, only when Mixtape is in the background.");
+        });
+        section(ui, "Dependencies");
+        hint(ui, "Programs Mixtape runs. Point at a name to see which copy it uses.");
         ui.add_space(4.0);
         egui::Grid::new("dependencies").num_columns(4).spacing([14.0, 6.0]).show(ui, |ui| {
             for t in &backend::TOOLS {
@@ -1702,6 +1707,37 @@ fn cover(ui: &mut egui::Ui, url: &str, size: f32) {
     } else {
         ui.add_space(size + ui.spacing().item_spacing.x);
     }
+}
+
+/// Settings layout: a section heading.
+fn section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(18.0);
+    ui.label(egui::RichText::new(title).strong().size(17.0));
+    ui.separator();
+    ui.add_space(4.0);
+}
+
+/// Settings layout: the label in a fixed-width left column, lined up with the first line of the
+/// setting, and the setting (with its hint lines) in the space to the right, wrapping there.
+fn setting(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
+    const LABEL_WIDTH: f32 = 130.0;
+    ui.horizontal_top(|ui| {
+        let height = ui.spacing().interact_size.y;
+        ui.allocate_ui_with_layout(egui::vec2(LABEL_WIDTH, height), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.set_min_width(LABEL_WIDTH);
+            ui.label(label);
+        });
+        ui.vertical(|ui| {
+            ui.set_max_width(ui.available_width().min(720.0));
+            add(ui);
+        });
+    });
+    ui.add_space(10.0);
+}
+
+/// Settings layout: one line of help under a setting, small and dimmed.
+fn hint(ui: &mut egui::Ui, text: &str) {
+    ui.add(egui::Label::new(egui::RichText::new(text).small().weak()).wrap());
 }
 
 /// An error in plain words, with a button that copies the full details for a bug report.

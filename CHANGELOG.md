@@ -6,6 +6,15 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 
 ## Unreleased
 
+- Settings page redesign: a title, sections (Library, Downloads, App,
+  Dependencies), labels lined up with the first line of each setting, short
+  choice labels with a dimmed line of help under each, help text that wraps
+  instead of running off the edge, and the "folder doesn't exist" warning
+  under the folder box.
+- A desktop notification ("Downloads finished: Downloaded 12 songs") when a
+  batch of downloads finishes while Mixtape is in the background. On by
+  default; **Settings > Notifications** turns it off. It uses notify-send,
+  now listed under Dependencies.
 - Setup check for YouTube's download challenges: Mixtape looks for a
   JavaScript runtime (Deno, or Node, Bun or QuickJS, which it then tells
   yt-dlp to use) and for yt-dlp's challenge solver (yt-dlp-ejs). If either is
