@@ -25,6 +25,10 @@ enum Msg {
     Release(Result<Option<backend::Version>, String>),
     Updated(Result<(), String>),
     Trashed(Vec<PathBuf>, Result<(), String>),
+    /// An old file and the YouTube Music song it came from, for Fix tags.
+    Resolved(PathBuf, Result<Song, String>),
+    /// Fix tags finished looking up songs; how many it couldn't.
+    ResolveDone(usize),
     Probed(Vec<(PathBuf, backend::AudioInfo)>),
 }
 
@@ -218,6 +222,10 @@ struct App {
     missing: Vec<&'static backend::Tool>,
     /// Selected songs and folders waiting on "Move to Trash?".
     trash_confirm: Option<Vec<PathBuf>>,
+    /// Songs waiting on "Fix tags?".
+    fix_confirm: Option<Vec<PathBuf>>,
+    /// Song id -> the old file it replaces; trashed once the new download is in.
+    replaces: HashMap<String, PathBuf>,
     update: Update,
     preview: Preview,
     downloads: Downloads,
@@ -237,8 +245,29 @@ struct App {
     rx: Receiver<Msg>,
 }
 
+/// A song from search counts as had when Mixtape downloaded it, or any file has its artist and title.
 fn in_library(logged: &HashSet<String>, scan: &Option<Scan>, s: &Song) -> bool {
-    logged.contains(&s.id) || scan.as_ref().is_some_and(|sc| sc.keys.contains(&backend::key(&s.artist, &s.title)))
+    logged.contains(&s.id) || scan.as_ref().is_some_and(|sc| sc.keys.contains_key(&backend::key(&s.artist, &s.title)))
+}
+
+/// An album's track only counts as had when it's in that album's folder (or was downloaded from
+/// that album), so downloading an album gets all of it.
+fn in_album(logged: &HashSet<String>, music_dir: &std::path::Path, s: &Song) -> bool {
+    logged.contains(&s.id) || backend::already_there(music_dir, s)
+}
+
+/// The album folder of another copy of this song, for "also on Greatest Hits".
+fn elsewhere(scan: &Option<Scan>, s: &Song) -> Option<String> {
+    let path = scan.as_ref()?.keys.get(&backend::key(&s.artist, &s.title))?;
+    Some(path.parent()?.file_name()?.to_string_lossy().into_owned())
+}
+
+/// What a result row needs to know about the library and downloads.
+struct Lib<'a> {
+    jobs: &'a HashMap<String, Job>,
+    logged: &'a HashSet<String>,
+    scan: &'a Option<Scan>,
+    music_dir: &'a std::path::Path,
 }
 
 impl App {
@@ -289,6 +318,8 @@ impl App {
             notice: None,
             batch: (0, 0),
             trash_confirm: None,
+            fix_confirm: None,
+            replaces: HashMap::new(),
             update: Update::None,
             downloads: Downloads(Running::default()),
             cancelled: HashSet::new(),
@@ -355,14 +386,14 @@ impl App {
             Msg::Search(..) => {} // results of an older search
             Msg::Album(id, result) => {
                 self.album_loads = self.album_loads.saturating_sub(1);
-                let (logged, scan) = (&self.logged, &self.scan);
+                let (logged, dir) = (&self.logged, &self.settings.music_dir);
                 if let Some(a) = self.albums.iter_mut().find(|a| a.album.id == id) {
                     a.loading = false;
                     match result {
                         Ok(tracks) => {
                             let checked = a.checked;
                             a.tracks = Some(
-                                tracks.into_iter().map(|song| Row { checked: checked && !in_library(logged, scan, &song), song }).collect(),
+                                tracks.into_iter().map(|song| Row { checked: checked && !in_album(logged, dir, &song), song }).collect(),
                             );
                         }
                         Err(e) => a.error = Some(e),
@@ -390,6 +421,14 @@ impl App {
                     Ok(backend::Downloaded { path, source }) => {
                         if let Err(e) = backend::append_log(&song.id, &path) {
                             self.status = Some(format!("Could not write the download log: {e}"));
+                        }
+                        // Fix tags: the fresh copy is in, so the old one goes (unless it was overwritten in place).
+                        if let Some(old) = self.replaces.remove(&song.id)
+                            && old != path
+                            && let Err(e) =
+                                backend::trash(std::slice::from_ref(&old)).and_then(|_| backend::forget(std::slice::from_ref(&old)))
+                        {
+                            self.status = Some(format!("Could not move the old copy to the Trash: {e}"));
                         }
                         self.logged.insert(song.id.clone());
                         self.batch.0 += 1;
@@ -428,8 +467,10 @@ impl App {
             Msg::Indexed(root, index, groups) => {
                 // Ignore the result for a folder that's no longer the music folder.
                 if let Some(scan) = self.scan.as_mut().filter(|s| s.root.path == root) {
-                    for info in index.values() {
-                        scan.keys.extend(backend::tag_keys(info));
+                    for (path, info) in &index {
+                        for k in backend::tag_keys(info) {
+                            scan.keys.entry(k).or_insert_with(|| path.clone());
+                        }
                     }
                     self.details.extend(index);
                     self.duplicates = groups;
@@ -468,6 +509,17 @@ impl App {
                     (Err(e), _) => Update::Failed(e),
                     (Ok(()), _) => Update::None,
                 };
+            }
+            Msg::Resolved(old, Ok(song)) => {
+                self.replaces.insert(song.id.clone(), old);
+                self.overwrite.insert(song.id.clone());
+                self.enqueue(song);
+            }
+            Msg::Resolved(_, Err(_)) => {}
+            Msg::ResolveDone(missed) => {
+                if missed > 0 {
+                    self.notify(format!("{missed} couldn't be found on YouTube Music, so they were left as they are"));
+                }
             }
             Msg::Picked(dir) => {
                 if let Some(dir) = dir {
@@ -652,7 +704,8 @@ impl App {
         let mut wants_confirm = None;
         let mut load_album = Vec::new();
         let mut open_artist = None;
-        let Self { songs, albums, artists, page_title, jobs, logged, scan, preview, .. } = self;
+        let Self { songs, albums, artists, page_title, jobs, logged, scan, preview, settings, .. } = self;
+        let lib = Lib { jobs, logged, scan, music_dir: &settings.music_dir };
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             if let Some(title) = page_title {
                 ui.horizontal(|ui| {
@@ -697,7 +750,7 @@ impl App {
                                 && let Some(tracks) = &mut a.tracks
                             {
                                 for t in tracks {
-                                    t.checked = a.checked && !in_library(logged, scan, &t.song);
+                                    t.checked = a.checked && !in_album(lib.logged, lib.music_dir, &t.song);
                                 }
                             }
                             cover(ui, &a.album.thumb, 48.0);
@@ -718,7 +771,7 @@ impl App {
                     {
                         ui.indent(&a.album.id, |ui| {
                             for row in tracks.iter_mut() {
-                                song_row(ui, row, jobs, logged, scan, &mut wants_confirm, preview);
+                                song_row(ui, row, &lib, true, &mut wants_confirm, preview);
                             }
                         });
                     }
@@ -728,7 +781,7 @@ impl App {
             if !songs.is_empty() {
                 ui.heading("Songs");
                 for row in songs.iter_mut() {
-                    song_row(ui, row, jobs, logged, scan, &mut wants_confirm, preview);
+                    song_row(ui, row, &lib, false, &mut wants_confirm, preview);
                 }
             }
         });
@@ -801,6 +854,18 @@ impl App {
                 ui.add_enabled(!trash.is_empty(), egui::Button::new(format!("Move to Trash ({})", trash.len()))).on_hover_text("Delete");
             if (clicked.clicked() || std::mem::take(&mut self.trash_now)) && !trash.is_empty() {
                 self.trash_confirm = Some(trash);
+            }
+            // Every song under the ticked songs and folders.
+            let songs: Vec<PathBuf> = self
+                .scan
+                .as_ref()
+                .map(|s| s.all.iter().map(|(p, _)| p).filter(|p| picked.iter().any(|q| p.starts_with(q))).cloned().collect())
+                .unwrap_or_default();
+            let fix = ui.add_enabled(!songs.is_empty(), egui::Button::new(format!("Fix tags ({})", songs.len()))).on_hover_text(
+                "Download these songs again with clean tags, track numbers and a square cover, then move the old files to the Trash",
+            );
+            if fix.clicked() {
+                self.fix_confirm = Some(songs);
             }
             if ui.add_enabled(n > 0, egui::Button::new("Clear selection")).clicked() {
                 self.selected.clear();
@@ -967,7 +1032,7 @@ impl App {
             if i.consume_key(Modifiers::NONE, Key::F1) {
                 self.show_keys = true;
             }
-            if typing || self.confirm.is_some() || self.trash_confirm.is_some() {
+            if typing || self.confirm.is_some() || self.trash_confirm.is_some() || self.fix_confirm.is_some() {
                 return;
             }
             if i.consume_key(Modifiers::NONE, Key::Questionmark) || i.consume_key(Modifiers::SHIFT, Key::Slash) {
@@ -1171,6 +1236,42 @@ impl App {
         });
     }
 
+    fn fix_dialog(&mut self, ctx: &egui::Context) {
+        let Some(files) = &self.fix_confirm else { return };
+        let mut answer = None;
+        egui::Modal::new(egui::Id::new("fix")).show(ctx, |ui| {
+            let n = files.len();
+            ui.heading(if n == 1 { "Fix tags on 1 song?".to_string() } else { format!("Fix tags on {n} songs?") });
+            ui.label("Mixtape downloads each song again from YouTube Music, with its album's title, track number, year and a square cover, into Artist/Album. The old file then goes to the Trash.");
+            ui.weak("Each song is found by its artist folder and file name. Songs that can't be found are left alone.");
+            ui.horizontal(|ui| {
+                if ui.button("Fix tags").clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    answer = Some(false);
+                }
+            });
+        });
+        if let Some(yes) = answer {
+            let files = self.fix_confirm.take().unwrap();
+            if yes {
+                self.selected.clear();
+                self.notify(format!("Looking up {} songs…", files.len()));
+                let root = self.settings.music_dir.clone();
+                self.spawn(ctx, move |tx| {
+                    let mut missed = 0;
+                    for old in files {
+                        let song = backend::resolve(&root, &old);
+                        missed += usize::from(song.is_err());
+                        let _ = tx.send(Msg::Resolved(old, song));
+                    }
+                    Msg::ResolveDone(missed)
+                });
+            }
+        }
+    }
+
     fn trash_dialog(&mut self, ctx: &egui::Context) {
         let Some(paths) = &self.trash_confirm else { return };
         let mut answer = None;
@@ -1347,20 +1448,22 @@ impl App {
     }
 }
 
-fn song_row(
-    ui: &mut egui::Ui,
-    row_: &mut Row,
-    jobs: &HashMap<String, Job>,
-    logged: &HashSet<String>,
-    scan: &Option<Scan>,
-    wants_confirm: &mut Option<Song>,
-    preview: &mut Preview,
-) {
-    let have = in_library(logged, scan, &row_.song);
+/// One search result. `from_album` is a track in an opened album's list: it counts as had only
+/// when it's in that album's folder, and another copy elsewhere is mentioned instead.
+fn song_row(ui: &mut egui::Ui, row_: &mut Row, lib: &Lib, from_album: bool, wants_confirm: &mut Option<Song>, preview: &mut Preview) {
+    let have = if from_album { in_album(lib.logged, lib.music_dir, &row_.song) } else { in_library(lib.logged, lib.scan, &row_.song) };
+    let other_copy = if from_album && !have { elsewhere(lib.scan, &row_.song) } else { None };
     let id = row_.song.id.clone();
     let hovered = row(
         ui,
-        |ui| job_status(ui, jobs.get(&id), have),
+        |ui| {
+            job_status(ui, lib.jobs.get(&id), have);
+            if let Some(album) = &other_copy
+                && lib.jobs.get(&id).is_none()
+            {
+                ui.weak(format!("also on {album}")).on_hover_text("You have this song in another album's folder");
+            }
+        },
         |ui| {
             if ui.checkbox(&mut row_.checked, "").changed() && row_.checked && have {
                 row_.checked = false;
@@ -1377,7 +1480,11 @@ fn song_row(
             cover(ui, &row_.song.thumb, 40.0);
             ui.vertical(|ui| {
                 fit(ui, egui::RichText::new(&row_.song.title).strong());
-                let album = if row_.song.album.is_empty() { String::new() } else { format!(" · {}", row_.song.album) };
+                let album = if row_.song.album.is_empty() {
+                    " · no album (goes to Singles)".to_string()
+                } else {
+                    format!(" · {}", row_.song.album)
+                };
                 fit(ui, format!("{}{album} · {}", row_.song.artists, row_.song.duration));
             });
         },
@@ -1632,6 +1739,7 @@ impl eframe::App for App {
         });
         self.confirm_dialog(&ctx);
         self.trash_dialog(&ctx);
+        self.fix_dialog(&ctx);
         self.keys_dialog(&ctx);
     }
 }

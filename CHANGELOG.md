@@ -6,6 +6,21 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 
 ## Unreleased
 
+- Cleaner files: no more YouTube description, link, upload date or "Music"
+  genre in the tags; the date is the album's year instead.
+- Video endings come off titles: (Official Audio), (Official Video),
+  (Official Music Video), (Lyric Video), (Lyrics), (Visualizer), (Audio).
+  Real parts of a title, like (In the Air), stay.
+- Songs picked from search get their album's track number and year too
+  (Mixtape looks the album up when it downloads them).
+- A result with no album says "no album (goes to Singles)".
+- Downloading an album gets every track that isn't already in that album's
+  folder. A song you have on another album says "also on <album>" instead of
+  being skipped.
+- **Fix tags** in the Library re-downloads the ticked songs with clean tags,
+  track numbers, year and a square cover, finding each one on YouTube Music
+  by its artist folder, album folder and title, then moves the old file to
+  the Trash.
 - **Download selected** waits ("Loading tracks…") until every ticked album's
   track list has loaded, so an album still loading is no longer dropped.
 - Closing Mixtape stops its downloads (yt-dlp and the ffmpeg it runs); they

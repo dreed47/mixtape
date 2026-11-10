@@ -32,6 +32,12 @@ pub struct Song {
     /// Cover thumbnail (https), shown in search results.
     #[serde(default)]
     pub thumb: String,
+    /// The album's id, to look up the track number and year of a song found by search.
+    #[serde(default)]
+    pub album_id: String,
+    /// The album's release year, written as the date tag.
+    #[serde(default)]
+    pub year: String,
 }
 
 #[derive(Deserialize, Clone)]
@@ -418,7 +424,46 @@ fn ytmusic(mode: &str, arg: &str) -> Result<String, String> {
 /// A search, or a pasted YouTube / YouTube Music link to a song, album, playlist or artist.
 pub fn search(query: &str) -> Result<SearchResult, String> {
     let mode = if is_link(query) { "link" } else { "search" };
-    serde_json::from_str(&ytmusic(mode, query)?).map_err(|e| e.to_string())
+    let mut result: SearchResult = serde_json::from_str(&ytmusic(mode, query)?).map_err(|e| e.to_string())?;
+    tidy(&mut result.songs);
+    Ok(result)
+}
+
+/// Video endings that aren't part of a song's name.
+const VIDEO_ENDINGS: [&str; 12] = [
+    "official audio",
+    "official video",
+    "official music video",
+    "official lyric video",
+    "official visualizer",
+    "official visualiser",
+    "lyric video",
+    "lyrics video",
+    "lyrics",
+    "visualizer",
+    "visualiser",
+    "audio",
+];
+
+/// "Heaven Is (Official Audio)" -> "Heaven Is". Only the endings above, in () or [], at the end;
+/// a real part of a title like "(In the Air)" stays.
+pub fn clean_title(title: &str) -> String {
+    let mut t = title.trim();
+    while let Some(open) = t.rfind(['(', '[']) {
+        let close = if t[open..].starts_with('(') { ')' } else { ']' };
+        let inner = t[open + 1..].strip_suffix(close).map(str::trim);
+        match inner {
+            Some(inner) if VIDEO_ENDINGS.iter().any(|e| inner.eq_ignore_ascii_case(e)) && open > 0 => t = t[..open].trim_end(),
+            _ => break,
+        }
+    }
+    t.to_string()
+}
+
+fn tidy(songs: &mut [Song]) {
+    for s in songs {
+        s.title = clean_title(&s.title);
+    }
 }
 
 pub fn is_link(query: &str) -> bool {
@@ -431,14 +476,49 @@ pub fn artist(channel_id: &str) -> Result<SearchResult, String> {
     if !safe_id(channel_id, 64) {
         return Err(format!("bad artist id {channel_id:?}"));
     }
-    serde_json::from_str(&ytmusic("artist", channel_id)?).map_err(|e| e.to_string())
+    let mut result: SearchResult = serde_json::from_str(&ytmusic("artist", channel_id)?).map_err(|e| e.to_string())?;
+    tidy(&mut result.songs);
+    Ok(result)
 }
 
 pub fn album_tracks(browse_id: &str) -> Result<Vec<Song>, String> {
     if !safe_id(browse_id, 64) {
         return Err(format!("bad album id {browse_id:?}"));
     }
-    serde_json::from_str(&ytmusic("album", browse_id)?).map_err(|e| e.to_string())
+    let mut songs: Vec<Song> = serde_json::from_str(&ytmusic("album", browse_id)?).map_err(|e| e.to_string())?;
+    tidy(&mut songs);
+    Ok(songs)
+}
+
+/// Album track lists already fetched this session, for `fill_from_album`.
+static ALBUMS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Vec<Song>>>> = std::sync::OnceLock::new();
+
+/// A song found by search has no track number or year; its album's track list has both.
+fn fill_from_album(s: &mut Song) {
+    if s.track.is_some() || s.album_id.is_empty() {
+        return;
+    }
+    let cache = ALBUMS.get_or_init(Default::default);
+    let cached = cache.lock().ok().and_then(|c| c.get(&s.album_id).cloned());
+    let Some(tracks) = cached.or_else(|| {
+        let tracks = album_tracks(&s.album_id).ok()?;
+        cache.lock().ok()?.insert(s.album_id.clone(), tracks.clone());
+        Some(tracks)
+    }) else {
+        return;
+    };
+    let same = |t: &&Song| t.id == s.id || norm(&t.title) == norm(&s.title);
+    if let Some(t) = tracks.iter().find(same) {
+        s.track = t.track;
+        s.year = t.year.clone();
+    }
+}
+
+/// True when this song is already at the place a download would put it (any audio format).
+pub fn already_there(dir: &Path, s: &Song) -> bool {
+    let [artist, album, file] = parts(s);
+    let base = dir.join(artist).join(album);
+    AUDIO_EXTS.iter().any(|ext| base.join(format!("{file}.{ext}")).is_file())
 }
 
 /// YouTube ids are [A-Za-z0-9_-]; anything else never reaches yt-dlp.
@@ -489,6 +569,9 @@ pub fn download(
     if !safe_id(&s.id, 11) {
         return Err(format!("bad video id {:?}", s.id));
     }
+    let mut s = s.clone();
+    fill_from_album(&mut s);
+    let s = &s;
     let [artist, album, title] = parts(s).map(|p| p.replace('%', "%%")); // yt-dlp template escaping
     let mut cmd = Command::new("yt-dlp");
     cmd.args(["-x", "--no-playlist", "--embed-metadata", "--convert-thumbnails", "jpg"]);
@@ -496,10 +579,17 @@ pub fn download(
     cmd.args(["--ppa", r#"ThumbnailsConvertor+ffmpeg_o:-c:v mjpeg -vf crop="'if(gt(ih,iw),iw,ih)':'if(gt(iw,ih),ih,iw)'""#]);
     // Tags from YouTube Music's song data; a music video's own title reads like "Artist - Song (Official Video)".
     let track = s.track.map(|n| n.to_string()).unwrap_or_default();
-    for (value, field) in [(&s.title, "title"), (&s.artists, "artist"), (&s.album, "album"), (&track, "track_number")] {
+    for (value, field) in
+        [(&s.title, "title"), (&s.artists, "artist"), (&s.album, "album"), (&track, "track_number"), (&s.year, "meta_date")]
+    {
         if let Some(arg) = set_tag(value, field) {
             cmd.arg("--parse-metadata").arg(arg);
         }
+    }
+    // Leave out YouTube's upload date (unless the album year replaced it), category, description and link.
+    let clear = ["meta_comment", "meta_description", "meta_synopsis", "meta_purl", "meta_genre"];
+    for field in clear.iter().copied().chain(s.year.is_empty().then_some("meta_date")) {
+        cmd.arg("--parse-metadata").arg(format!(":(?P<{field}>)"));
     }
     match settings.format {
         Format::Mp3 => cmd.args(["--audio-format", "mp3", "--audio-quality", "0", "--embed-thumbnail"]),
@@ -595,6 +685,66 @@ fn forget_lines(text: &str, paths: &[PathBuf]) -> String {
 }
 
 /// Ids Mixtape has downloaded before.
+/// The YouTube Music album track a library file is: searched by its artist folder and file name
+/// ("Queen" + "01 Bicycle Race" -> "Queen Bicycle Race"), taking the result whose artist and title
+/// both match. Music videos have no album, so the link a file came from is only the last resort.
+pub fn resolve(root: &Path, path: &Path) -> Result<Song, String> {
+    let (artist, title) = artist_and_title(root, path).ok_or("the file isn't inside an artist folder")?;
+    let same_title = |s: &&Song| norm(&s.title) == norm(&title);
+    let same_artist = |s: &&Song| norm(&s.artist) == norm(&artist);
+    // Keep the song on the album it's filed under (a Greatest Hits stays a Greatest Hits).
+    let folder = path.parent().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if path.strip_prefix(root).is_ok_and(|p| p.components().count() >= 3) && !folder.eq_ignore_ascii_case("Singles") {
+        let found = search(&format!("{artist} {folder}"))?;
+        let album = found.albums.iter().find(|a| norm(&a.title) == norm(&folder) && norm(&a.artists).contains(&norm(&artist)));
+        if let Some(album) = album
+            && let Some(song) = album_tracks(&album.id)?.into_iter().find(|s| same_title(&s))
+        {
+            return Ok(song);
+        }
+    }
+    let found = search(&format!("{artist} {title}"))?;
+    if let Some(song) = found.songs.iter().filter(same_title).find(same_artist).or_else(|| found.songs.iter().find(same_title)) {
+        return Ok(song.clone());
+    }
+    let link = source_link(path).ok_or_else(|| format!("couldn't find \"{title}\" by {artist} on YouTube Music"))?;
+    search(&link)?.songs.into_iter().next().ok_or_else(|| format!("couldn't find \"{title}\" by {artist} on YouTube Music"))
+}
+
+/// "Queen", "Bicycle Race" from <root>/Queen/Greatest Hits/05 Bicycle Race.mp3.
+fn artist_and_title(root: &Path, path: &Path) -> Option<(String, String)> {
+    let below = path.strip_prefix(root).ok()?;
+    if below.components().count() < 2 {
+        return None;
+    }
+    let artist = below.components().next()?.as_os_str().to_string_lossy().into_owned();
+    let stem = path.file_stem()?.to_string_lossy();
+    let title = clean_title(stem.trim_start_matches(|c: char| c.is_ascii_digit() || " -.".contains(c)));
+    Some((artist, title))
+}
+
+/// The YouTube link a song file came from: Mixtape's download log, or the link older downloads
+/// left in the file's tags (purl or comment). None for files from elsewhere.
+pub fn source_link(path: &Path) -> Option<String> {
+    let log = std::fs::read_to_string(log_file()).unwrap_or_default();
+    let logged = log.lines().filter_map(|l| l.split_once('\t')).find(|(_, p)| Path::new(p) == path).map(|(id, _)| id.to_string());
+    let id = logged.filter(|id| safe_id(id, 11)).or_else(|| {
+        let out = Command::new("ffprobe")
+            .args(["-v", "error", "-of", "json", "-show_entries", "format_tags=purl,comment:stream_tags=purl,comment"])
+            .arg(path)
+            .output()
+            .ok()?;
+        youtube_id_in(&String::from_utf8_lossy(&out.stdout))
+    })?;
+    Some(format!("https://music.youtube.com/watch?v={id}"))
+}
+
+fn youtube_id_in(text: &str) -> Option<String> {
+    let at = text.find("watch?v=")? + "watch?v=".len();
+    let id: String = text[at..].chars().take(11).collect();
+    safe_id(&id, 11).then_some(id).filter(|id| id.len() == 11)
+}
+
 pub fn read_log() -> HashSet<String> {
     let text = std::fs::read_to_string(log_file()).unwrap_or_default();
     text.lines().filter_map(|l| l.split('\t').next()).filter(|id| !id.is_empty()).map(String::from).collect()
@@ -987,7 +1137,7 @@ pub struct Folder {
 
 pub struct Scan {
     /// artist|title keys for every audio file, from its path.
-    pub keys: HashSet<String>,
+    pub keys: HashMap<String, PathBuf>,
     pub root: Folder,
     /// Every song with when it was last changed, newest first.
     pub all: Vec<(PathBuf, std::time::SystemTime)>,
@@ -1010,7 +1160,7 @@ impl Scan {
 
 /// Walks the music folder. shortcut: songs are matched by path (Artist/Album/Title, Artist/Title or "Artist - Title"), not by reading tags; read ID3 tags if files from other tools are named differently.
 pub fn scan(dir: &Path) -> Scan {
-    let (mut keys, mut all) = (HashSet::new(), Vec::new());
+    let (mut keys, mut all) = (HashMap::new(), Vec::new());
     let root = walk(dir, dir.display().to_string(), &mut keys, &mut all);
     all.sort_by_key(|f| std::cmp::Reverse(f.1));
     Scan { keys, root, all }
@@ -1023,7 +1173,7 @@ fn is_stems_folder(files: &[PathBuf]) -> bool {
     files.len() >= 2 && files.iter().all(|f| f.file_stem().is_some_and(|s| STEM_NAMES.iter().any(|n| s.eq_ignore_ascii_case(n))))
 }
 
-fn walk(dir: &Path, name: String, keys: &mut HashSet<String>, songs: &mut Vec<(PathBuf, std::time::SystemTime)>) -> Folder {
+fn walk(dir: &Path, name: String, keys: &mut HashMap<String, PathBuf>, songs: &mut Vec<(PathBuf, std::time::SystemTime)>) -> Folder {
     let mut folder = Folder { name, path: dir.to_path_buf(), children: vec![], files: vec![] };
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let path = entry.path();
@@ -1050,11 +1200,11 @@ fn walk(dir: &Path, name: String, keys: &mut HashSet<String>, songs: &mut Vec<(P
             let dir_name = |p: Option<&Path>| p.and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let parent = path.parent();
             for artist in [dir_name(parent), dir_name(parent.and_then(Path::parent))] {
-                keys.insert(key(&artist, &stem));
-                keys.insert(key(&artist, title));
+                keys.entry(key(&artist, &stem)).or_insert_with(|| path.clone());
+                keys.entry(key(&artist, title)).or_insert_with(|| path.clone());
             }
             if let Some((artist, t)) = stem.split_once(" - ") {
-                keys.insert(key(artist, t));
+                keys.entry(key(artist, t)).or_insert_with(|| path.clone());
             }
         }
     }
@@ -1077,6 +1227,8 @@ mod tests {
             duration: String::new(),
             track: None,
             thumb: String::new(),
+            album_id: String::new(),
+            year: String::new(),
         }
     }
 
@@ -1260,7 +1412,7 @@ mod tests {
         let s = scan(&dir);
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(s.all.len(), 1);
-        assert!(!s.keys.contains(&key("stems", "vocals")));
+        assert!(!s.keys.contains_key(&key("stems", "vocals")));
         assert_eq!(s.root.children[1].children[0].files.len(), 6); // still shown in the tree
         assert!(is_blocked("ERROR: [youtube] x: Sign in to confirm you're not a bot"));
         assert!(!is_blocked("ERROR: Video unavailable"));
@@ -1279,6 +1431,33 @@ mod tests {
         // Nothing from that group is left (pgrep -g exits 1 when it finds none).
         let left = Command::new("pgrep").arg("-g").arg(child.id().to_string()).output().unwrap();
         assert!(!left.status.success(), "left behind: {}", String::from_utf8_lossy(&left.stdout));
+    }
+
+    #[test]
+    fn video_endings_come_off_titles() {
+        assert_eq!(clean_title("Heaven Is (Official Audio)"), "Heaven Is");
+        assert_eq!(clean_title("Song [Official Music Video] (Lyrics)"), "Song");
+        assert_eq!(clean_title("In the Air Tonight (In the Air)"), "In the Air Tonight (In the Air)");
+        assert_eq!(clean_title("Bohemian Rhapsody (Remastered 2011)"), "Bohemian Rhapsody (Remastered 2011)");
+        assert_eq!(clean_title("(Audio)"), "(Audio)"); // nothing would be left
+    }
+
+    #[test]
+    fn artist_and_title_from_the_path() {
+        let root = Path::new("/m");
+        assert_eq!(
+            artist_and_title(root, Path::new("/m/Queen/Greatest Hits/05 Bicycle Race (Official Video).mp3")),
+            Some(("Queen".into(), "Bicycle Race".into()))
+        );
+        assert_eq!(artist_and_title(root, Path::new("/m/loose.mp3")), None);
+    }
+
+    #[test]
+    fn finds_the_youtube_id_in_old_tags() {
+        let json = r#"{"format":{"tags":{"purl":"https://www.youtube.com/watch?v=xt0V0_1MS0Q","comment":"x"}}}"#;
+        assert_eq!(youtube_id_in(json).as_deref(), Some("xt0V0_1MS0Q"));
+        assert_eq!(youtube_id_in("watch?v=short"), None);
+        assert_eq!(youtube_id_in("{}"), None);
     }
 
     #[test]
@@ -1303,8 +1482,8 @@ mod tests {
         assert_eq!(s.matching("thunder").len(), 1);
         assert_eq!(s.matching("rick thunder").len(), 0);
         assert_eq!(s.matching("").len(), 2);
-        assert!(s.keys.contains(&key("rick astley", "Never Gonna Give You Up")));
-        assert!(s.keys.contains(&key("AC/DC", "thunderstruck")));
+        assert!(s.keys.contains_key(&key("rick astley", "Never Gonna Give You Up")));
+        assert!(s.keys.contains_key(&key("AC/DC", "thunderstruck")));
         assert_eq!(s.root.children[0].name, "Rick Astley");
         assert_eq!(s.root.children[0].children.len(), 1);
         assert_eq!(s.root.children[0].children[0].files.len(), 1);

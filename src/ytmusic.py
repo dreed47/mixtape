@@ -22,17 +22,21 @@ def thumb(item, size=120):
     return url if url.startswith("https://") else ""
 
 
-def song(s, album=None, album_artists=(), cover=""):
+def song(s, album=None, album_artists=(), cover="", year=""):
     artists = names(s) or list(album_artists)
+    album_info = s.get("album") if isinstance(s.get("album"), dict) else {}  # a plain name in album track lists
     return {
         "id": s["videoId"],
         "title": s.get("title") or "",
         "artist": artists[0] if artists else "",
         "artists": ", ".join(artists),
-        "album": album if album is not None else (s.get("album") or {}).get("name") or "",
+        "album": album if album is not None else album_info.get("name") or "",
         "duration": s.get("duration") or s.get("length") or "",
         "track": s.get("trackNumber") if album is not None else None,
         "thumb": thumb(s) or cover,
+        # Lets Mixtape look up the track number and year of a song found by search.
+        "album_id": album_info.get("id") or "",
+        "year": str(year or s.get("year") or ""),
     }
 
 
@@ -64,8 +68,12 @@ def search(query):
 
 def album_tracks(browse_id):
     a = yt.get_album(browse_id)
-    cover = thumb(a)
-    return [song(t, a.get("title") or "", names(a), cover) for t in a.get("tracks") or [] if t.get("videoId")]
+    cover, year = thumb(a), a.get("year") or ""
+    return [
+        {**song(t, a.get("title") or "", names(a), cover, year), "album_id": browse_id}
+        for t in a.get("tracks") or []
+        if t.get("videoId")
+    ]
 
 
 def album_by_id(browse_id):

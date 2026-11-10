@@ -35,6 +35,8 @@ when Omarchy is installed and works on any Linux desktop otherwise.
   Double-click a song to play it. Right-click a song to play it, open it in the
   Stems app when it is installed, or show it in your file manager. Right-click
   a folder, or click **Open in file manager**, to open it there.
+- **Fix tags.** Tick older songs in the Library and click **Fix tags** to
+  download them again with clean tags, track numbers and a square cover.
 - **Duplicates.** The Library lists songs you have more than once (same
   artist and title, same length), so you can trash the extra copies.
 - **Downloads resume.** Songs still waiting when you close Mixtape start
