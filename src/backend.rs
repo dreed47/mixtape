@@ -75,6 +75,10 @@ fn home() -> PathBuf {
 }
 
 fn xdg(var: &str, fallback: &str) -> PathBuf {
+    // Tests must never read or write the real settings, download log, queue or caches.
+    if cfg!(test) {
+        return std::env::temp_dir().join(format!("mixtape-tests-{}", std::process::id())).join(fallback);
+    }
     std::env::var_os(var).map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home().join(fallback))
 }
 
@@ -1658,6 +1662,14 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(no_trash("Error trashing file: Unable to find or create trash directory"));
         assert!(!no_trash("Permission denied"));
+    }
+
+    #[test]
+    fn tests_never_touch_real_files() {
+        let scratch = std::env::temp_dir();
+        for file in [settings_file(), log_file(), queue_file(), cache_file()] {
+            assert!(file.starts_with(&scratch), "{} is outside the temp folder", file.display());
+        }
     }
 
     #[test]

@@ -28,8 +28,13 @@ const PARALLEL_DOWNLOADS: usize = 2;
 enum Msg {
     Search(u64, Result<SearchResult, String>),
     Album(String, Result<Vec<Song>, String>),
+    /// A download thread took this song from the queue.
+    Started(String),
     Progress(String, f32),
-    Done(Song, Result<backend::Downloaded, String>),
+    /// A song finished (or failed); true when the user had cancelled it.
+    Done(Song, Result<backend::Downloaded, String>, bool),
+    /// The queue ran out (or paused): songs downloaded and failed in this batch.
+    BatchDone(usize, usize),
     Scanned(Scan),
     /// Details and tags for every song in the folder at `PathBuf`, and the duplicate groups among them.
     Indexed(PathBuf, HashMap<PathBuf, backend::AudioInfo>, Vec<Vec<PathBuf>>),
@@ -107,8 +112,6 @@ struct App {
     confirm: Option<Song>,
 
     jobs: HashMap<String, Job>,
-    queue: VecDeque<Song>,
-    running: usize,
     /// Every song queued this session, oldest first, for the Downloads list.
     history: Vec<Song>,
 
@@ -119,8 +122,6 @@ struct App {
     stems: bool,
     /// A short confirmation ("Settings saved") and when it was shown; it fades after a few seconds.
     notice: Option<(String, std::time::Instant)>,
-    /// Songs finished and failed since the queue was last empty.
-    batch: (usize, usize),
     /// Tools that weren't found at startup or at the last "Check again".
     missing: Vec<&'static backend::Tool>,
     /// Selected songs and folders waiting on "Move to Trash?".
@@ -136,12 +137,6 @@ struct App {
     update: Update,
     preview: Preview,
     downloads: Downloads,
-    /// Running downloads the user cancelled; their failure isn't reported.
-    cancelled: HashSet<String>,
-    /// Songs to replace on disk ("Download again").
-    overwrite: HashSet<String>,
-    /// Why new downloads aren't starting (YouTube's bot check or rate limit), until Resume.
-    paused: Option<String>,
     /// When GitHub was last asked for a newer release.
     update_checked: Option<std::time::Instant>,
     /// Format, bitrate, length and size of songs shown in the Library, read in the background.
@@ -214,8 +209,6 @@ impl App {
             ytdlp_outdated: None,
             confirm: None,
             jobs: HashMap::new(),
-            queue: VecDeque::new(),
-            running: 0,
             history: vec![],
             logged: HashSet::new(),
             scan: None,
@@ -224,17 +217,13 @@ impl App {
             stems: backend::stems_installed(),
             missing: backend::missing_tools(),
             notice: None,
-            batch: (0, 0),
             trash_confirm: None,
             fix_confirm: None,
             delete_confirm: None,
             untrashable: vec![],
             replaces: HashMap::new(),
             update: Update::None,
-            downloads: Downloads(Running::default()),
-            cancelled: HashSet::new(),
-            overwrite: HashSet::new(),
-            paused: None,
+            downloads: Downloads(Default::default()),
             preview: Preview { mpv: backend::mpv_installed(), playing: None, clicked: None, hovered: None },
             update_checked: None,
             details: HashMap::new(),
@@ -306,28 +295,21 @@ impl App {
                     }
                 }
             }
+            Msg::Started(id) => {
+                self.jobs.insert(id, Job::Running(0.0));
+            }
             Msg::Progress(id, f) => {
                 self.jobs.insert(id, Job::Running(f));
             }
-            Msg::Done(song, result) => {
-                self.running -= 1;
-                if self.cancelled.remove(&song.id) {
+            Msg::Done(song, result, cancelled) => {
+                if cancelled {
                     self.jobs.remove(&song.id);
                     self.history.retain(|s| s.id != song.id);
-                    self.save_queue();
                     return;
                 }
-                if let Err(e) = &result
-                    && backend::is_blocked(e)
-                    && self.paused.is_none()
-                {
-                    self.paused = Some(backend::friendly(e));
-                }
+                // The download thread already wrote the log and the saved queue.
                 let job = match result {
                     Ok(backend::Downloaded { path, source }) => {
-                        if let Err(e) = backend::append_log(&song.id, &path) {
-                            self.status = Some(format!("Could not write the download log: {e}"));
-                        }
                         // Fix tags: the fresh copy is in, so the old one goes (unless it was overwritten in place).
                         if let Some(old) = self.replaces.remove(&song.id)
                             && old != path
@@ -341,33 +323,19 @@ impl App {
                             }
                         }
                         self.logged.insert(song.id.clone());
-                        self.batch.0 += 1;
                         Job::Done(source)
                     }
-                    Err(e) => {
-                        self.batch.1 += 1;
-                        Job::Failed(e)
-                    }
+                    Err(e) => Job::Failed(e),
                 };
                 self.jobs.insert(song.id, job);
-                self.save_queue();
-                if self.queue.is_empty() && self.running == 0 {
-                    if !self.untrashable.is_empty() {
-                        self.delete_confirm = Some(std::mem::take(&mut self.untrashable));
-                    }
-                    let (ok, failed) = std::mem::take(&mut self.batch);
-                    let songs = |n| if n == 1 { "1 song".to_string() } else { format!("{n} songs") };
-                    let summary = match failed {
-                        0 => format!("Downloaded {}", songs(ok)),
-                        _ => format!("Downloaded {}, {} failed", songs(ok), failed),
-                    };
-                    // Only worth a desktop notification when you're looking at something else.
-                    if self.settings.notify && !ctx.input(|i| i.focused) {
-                        backend::desktop_notification("Downloads finished", &summary);
-                    }
-                    self.notify(if failed > 0 { format!("{summary} (see Downloads)") } else { summary });
-                    self.rescan(ctx);
+            }
+            Msg::BatchDone(ok, failed) => {
+                if !self.untrashable.is_empty() {
+                    self.delete_confirm = Some(std::mem::take(&mut self.untrashable));
                 }
+                let summary = batch_summary(ok, failed);
+                self.notify(if failed > 0 { format!("{summary} (see Downloads)") } else { summary });
+                self.rescan(ctx);
             }
             Msg::Scanned(scan) => {
                 self.scanning = false;
@@ -453,7 +421,7 @@ impl App {
             }
             Msg::Resolved(old, Ok(song)) => {
                 self.replaces.insert(song.id.clone(), old);
-                self.overwrite.insert(song.id.clone());
+                self.downloads.0.lock().overwrite.insert(song.id.clone());
                 self.enqueue(song);
             }
             Msg::Resolved(_, Err(_)) => {}
@@ -477,24 +445,37 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-        self.theme.update(&ctx);
-        self.zoom_keys(&ctx);
-        self.shortcuts(&ctx);
+    /// Background work, separate from drawing: eframe keeps calling this while the window is hidden
+    /// (another workspace, minimized), when `ui` doesn't run. Finished downloads get handled, the
+    /// queue keeps moving and the "finished" notification goes out even when you're elsewhere.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.preview.poll();
         while let Ok(msg) = self.rx.try_recv() {
-            self.handle(&ctx, msg);
+            self.handle(ctx, msg);
         }
-        self.start_downloads(&ctx);
+        self.start_downloads(ctx);
         const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
         if self.settings.check_updates && self.update_checked.is_none_or(|t| t.elapsed() > DAY) {
             self.update_checked = Some(std::time::Instant::now());
-            self.spawn(&ctx, |_| Msg::Release(backend::latest_release()));
+            self.spawn(ctx, |_| Msg::Release(backend::latest_release()));
         }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        // For the download threads: whether you're looking at Mixtape (see Shared::away).
+        let shared = &self.downloads.0;
+        shared.focused.store(ctx.input(|i| i.viewport().focused) != Some(false), std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut t) = shared.last_drawn.lock() {
+            *t = std::time::Instant::now();
+        }
+        self.theme.update(&ctx);
+        self.zoom_keys(&ctx);
+        self.shortcuts(&ctx);
         egui::Panel::bottom("footer").show(ui, |ui| self.footer(ui));
         // The Downloads list opens while something is downloading; otherwise it's one line.
-        let busy = self.running + self.queue.len() > 0 || self.paused.is_some();
+        let (running, waiting) = self.queue_counts();
+        let busy = running + waiting > 0 || self.paused().is_some();
         if busy || self.downloads_open {
             egui::Panel::bottom("downloads").resizable(true).default_size(180.0).min_size(80.0).show(ui, |ui| {
                 ui.add_space(6.0);

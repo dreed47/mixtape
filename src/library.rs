@@ -152,10 +152,12 @@ impl App {
             let n = self.selected.len();
             let mut picked: Vec<PathBuf> = self.selected.iter().cloned().collect();
             picked.sort();
-            if ui.add_enabled(n > 0, egui::Button::new(format!("Play selected ({n})"))).clicked()
-                && let Err(e) = backend::open_with(&self.settings.player, &picked)
-            {
-                self.status = Some(e);
+            if ui.add_enabled(n > 0, egui::Button::new(format!("Play selected ({n})"))).clicked() {
+                if let Err(e) = backend::open_with(&self.settings.player, &picked) {
+                    self.status = Some(e);
+                }
+                // Done with them: ticks left behind could later go to the Trash by surprise.
+                self.selected.clear();
             }
             // Never the music folder itself, and nothing inside a folder that's also going.
             let trash: Vec<PathBuf> =
@@ -213,11 +215,15 @@ impl App {
                 self.library_filter.clear();
             }
             ui.separator();
+            let view = self.view;
             ui.selectable_value(&mut self.view, View::Folders, "Folders");
             ui.selectable_value(&mut self.view, View::Recent, "Recently added");
             let dups = if self.indexing { "Duplicates…".to_string() } else { format!("Duplicates ({})", self.duplicates.len()) };
             ui.selectable_value(&mut self.view, View::Duplicates, dups)
                 .on_hover_text("The same song in more than one place: same artist and title, and lengths within 3 seconds");
+            if self.view != view {
+                self.selected.clear(); // ticks you can no longer see shouldn't stay selected
+            }
         });
         let Some(scan) = &self.scan else { return };
         let mut tree = Tree {
@@ -406,12 +412,23 @@ impl App {
     pub(crate) fn trash_dialog(&mut self, ctx: &egui::Context) {
         let Some(paths) = &self.trash_confirm else { return };
         let mut answer = None;
+        // Song counts per item, so a whole folder can't pass for one song.
+        let count = |p: &PathBuf| -> usize { self.scan.as_ref().map_or(0, |s| s.all.iter().filter(|(f, _)| f.starts_with(p)).count()) };
+        let folders: Vec<(&PathBuf, usize)> = paths.iter().filter(|p| p.is_dir()).map(|p| (p, count(p))).collect();
+        let songs = paths.len() - folders.len() + folders.iter().map(|(_, n)| n).sum::<usize>();
         egui::Modal::new(egui::Id::new("trash")).show(ctx, |ui| {
             let n = paths.len();
-            ui.heading(if n == 1 { "Move 1 item to the Trash?".to_string() } else { format!("Move {n} items to the Trash?") });
+            let what = if songs == 1 { "1 song".to_string() } else { format!("{songs} songs") };
+            ui.heading(format!("Move {what} to the Trash?"));
+            if !folders.is_empty() {
+                ui.colored_label(ui.visuals().warn_fg_color, "This includes whole folders, with every song in them:");
+            }
             for p in paths.iter().take(8) {
-                let kind = if p.is_dir() { "Folder" } else { "Song" };
-                ui.label(format!("{kind}: {}", p.file_name().unwrap_or_default().to_string_lossy()));
+                let name = p.file_name().unwrap_or_default().to_string_lossy();
+                match folders.iter().find(|(f, _)| *f == p) {
+                    Some((_, k)) => ui.strong(format!("•  Whole folder: {name} ({k} {})", if *k == 1 { "song" } else { "songs" })),
+                    None => ui.label(format!("•  {name}")),
+                };
             }
             if n > 8 {
                 ui.label(format!("…and {} more", n - 8));

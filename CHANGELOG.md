@@ -6,6 +6,16 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 
 ## Unreleased
 
+- Downloads keep going while Mixtape is on another workspace or minimized,
+  and the "finished" notification arrives then. On Wayland a hidden window
+  stops drawing, and the queue used to run from the window, so it stalled
+  until you came back (and then skipped the notification because you were
+  looking). The download threads now run the queue themselves.
+- **Move to Trash** says how many songs will go and marks each ticked folder
+  as a whole folder with its song count ("Whole folder: Jagged Little Pill
+  (13 songs)"). Ticks clear after **Play selected** and when you switch
+  Library views, so leftover ticks can't be trashed by surprise.
+- Tests use a temporary folder for settings and data, never the real ones.
 - Code: `main.rs` is split into one file per part of the window, and window
   tests (egui_kittest) cover Settings, the album download gate, the
   "Download again?" question and the music folder's missing tick box.

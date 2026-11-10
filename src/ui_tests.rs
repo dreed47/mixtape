@@ -107,3 +107,21 @@ fn the_music_folder_itself_has_no_tick_box() {
     assert_eq!(harness.get_all_by_role(Role::CheckBox).count(), 1);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn trashing_a_folder_says_it_is_a_whole_folder() {
+    let (mut state, dir) = app("trash");
+    let album = dir.join("Queen/Greatest Hits");
+    std::fs::create_dir_all(&album).unwrap();
+    for song in ["01 Bohemian Rhapsody.mp3", "02 Another One Bites the Dust.mp3"] {
+        std::fs::write(album.join(song), "").unwrap();
+    }
+    state.scan = Some(backend::scan(&dir));
+    state.trash_confirm = Some(vec![album.clone()]);
+    let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.trash_dialog(ui.ctx()), state);
+    harness.run();
+    harness.get_by_label("Move 2 songs to the Trash?");
+    harness.get_by_label("This includes whole folders, with every song in them:");
+    harness.get_by_label("•  Whole folder: Greatest Hits (2 songs)");
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -190,10 +190,10 @@ impl App {
                 self.rows_mut().for_each(|r| r.checked = false);
                 self.albums.iter_mut().for_each(|a| a.checked = false);
             }
-            let queued = self.queue.len();
-            if self.running + queued > 0 {
+            let (running, queued) = self.queue_counts();
+            if running + queued > 0 {
                 ui.spinner();
-                ui.label(format!("Downloading {}, {} waiting", self.running, queued));
+                ui.label(format!("Downloading {running}, {queued} waiting"));
             }
             if self.searching {
                 ui.spinner();
@@ -342,7 +342,7 @@ impl App {
         if let Some(yes) = answer {
             if yes {
                 self.rows_mut().filter(|r| r.song.id == song.id).for_each(|r| r.checked = true);
-                self.overwrite.insert(song.id.clone());
+                self.downloads.0.lock().overwrite.insert(song.id.clone());
             }
             self.confirm = None;
         }

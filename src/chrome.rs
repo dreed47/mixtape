@@ -269,7 +269,7 @@ impl App {
                 }
                 Update::Done(v) => {
                     ui.label(format!("· {} installed", backend::version_text(*v)));
-                    let busy = self.running + self.queue.len() > 0;
+                    let busy = self.queue_counts() != (0, 0);
                     let restart = ui.add_enabled(!busy, egui::Button::new("Restart to finish").small());
                     if restart.on_disabled_hover_text("Wait for the downloads to finish").clicked() {
                         match backend::relaunch() {
