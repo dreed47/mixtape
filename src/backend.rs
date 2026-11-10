@@ -292,6 +292,64 @@ fn install_hint_for(distro: Distro, tools: &[&Tool]) -> (Option<String>, Vec<Str
     ((!packages.is_empty()).then(|| format!("{tool} {}", packages.join(" "))), notes)
 }
 
+/// JavaScript runtimes yt-dlp can solve YouTube's challenges with: (program, yt-dlp's name for it).
+/// yt-dlp uses Deno by itself; the others have to be named with --js-runtimes.
+const JS_RUNTIMES: [(&str, &str); 4] = [("deno", "deno"), ("node", "node"), ("bun", "bun"), ("qjs", "quickjs")];
+
+/// The first runtime installed, as (program, yt-dlp name).
+pub fn js_runtime() -> Option<(&'static str, &'static str)> {
+    JS_RUNTIMES.into_iter().find(|(bin, _)| on_path(bin))
+}
+
+/// Whether the yt-dlp Mixtape runs has the challenge solver scripts (the yt-dlp-ejs package). A
+/// yt-dlp installed from Python is asked through its own interpreter; a single-file official build
+/// carries them inside.
+pub fn challenge_solver_installed() -> bool {
+    let Some(path) = tool_path("yt-dlp") else { return false };
+    let first = std::fs::read(&path).ok().and_then(|b| b.split(|c| *c == b'\n').next().map(|l| String::from_utf8_lossy(l).into_owned()));
+    let Some(shebang) = first.and_then(|l| l.strip_prefix("#!").map(str::to_string)) else { return true };
+    let mut words = shebang.split_whitespace();
+    let mut python = words.next().unwrap_or_default().to_string();
+    if python.ends_with("/env") {
+        python = words.next().unwrap_or_default().to_string(); // "#!/usr/bin/env python3"
+    }
+    Command::new(python).args(["-c", "import yt_dlp_ejs"]).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+}
+
+fn omarchy(os_release: &str) -> bool {
+    os_release.lines().any(|l| l.trim() == "ID=omarchy")
+}
+
+/// How to get a JavaScript runtime: a command, or a page to read where there's no simple command.
+pub fn js_runtime_hint() -> String {
+    js_runtime_hint_for(&std::fs::read_to_string("/etc/os-release").unwrap_or_default())
+}
+
+fn js_runtime_hint_for(os_release: &str) -> String {
+    match distro(os_release) {
+        _ if omarchy(os_release) => "omarchy-pkg-add deno".into(),
+        Distro::Arch => "sudo pacman -S deno".into(),
+        _ => "See https://docs.deno.com/runtime/getting_started/installation/".into(),
+    }
+}
+
+/// How to add the challenge solver to the yt-dlp Mixtape runs.
+pub fn challenge_solver_hint() -> String {
+    let path = tool_path("yt-dlp").unwrap_or_default();
+    challenge_solver_hint_for(&path, &home(), &std::fs::read_to_string("/etc/os-release").unwrap_or_default())
+}
+
+fn challenge_solver_hint_for(ytdlp: &Path, home: &Path, os_release: &str) -> String {
+    if ytdlp.starts_with(home) {
+        return "uv tool install --force 'yt-dlp[default]'".into();
+    }
+    match distro(os_release) {
+        _ if omarchy(os_release) => "omarchy-pkg-add yt-dlp-ejs".into(),
+        Distro::Arch => "sudo pacman -S yt-dlp-ejs".into(),
+        _ => "uv tool install --force 'yt-dlp[default]'".into(),
+    }
+}
+
 pub fn mpv_installed() -> bool {
     on_path("mpv")
 }
@@ -618,6 +676,9 @@ pub fn download(
     };
     if overwrite {
         cmd.arg("--force-overwrites");
+    }
+    if let Some((_, name)) = js_runtime().filter(|(bin, _)| *bin != "deno") {
+        cmd.args(["--js-runtimes", name]); // yt-dlp only uses Deno unless told otherwise
     }
     if !settings.cookies_browser.is_empty() {
         if !BROWSERS.iter().any(|b| b.1 == settings.cookies_browser) {
@@ -1164,10 +1225,9 @@ fn update_command_for(path: &Path, home: &Path, os_release: &str, installed: &st
     let packaged_days = packaged.and_then(version_days);
     let helps = packaged_days > version_days(installed) && packaged_days >= version_days(latest).map(|d| d - 14);
     if helps {
-        let omarchy = os_release.lines().any(|l| l.trim() == "ID=omarchy");
-        return if omarchy { "omarchy update".into() } else { "sudo pacman -Syu".into() };
+        return if omarchy(os_release) { "omarchy update".into() } else { "sudo pacman -Syu".into() };
     }
-    "uv tool install yt-dlp".into()
+    "uv tool install --force 'yt-dlp[default]'".into()
 }
 
 /// Lowercase letters and digits only, so "AC/DC" and "ac-dc" match.
@@ -1429,11 +1489,17 @@ mod tests {
         // Installed with uv: upgrade with uv.
         assert_eq!(update_command_for(uv_copy, home, omarchy, "2026.08.19", "2026.10.26", None), "uv tool upgrade yt-dlp");
         // Arch hasn't packaged the new release, so a system update wouldn't help.
-        assert_eq!(update_command_for(sys, home, omarchy, "2026.08.19", "2026.10.26", Some("2026.08.19")), "uv tool install yt-dlp");
+        assert_eq!(
+            update_command_for(sys, home, omarchy, "2026.08.19", "2026.10.26", Some("2026.08.19")),
+            "uv tool install --force 'yt-dlp[default]'"
+        );
         // It has: update the system, Omarchy's way on Omarchy.
         assert_eq!(update_command_for(sys, home, omarchy, "2026.08.19", "2026.10.26", Some("2026.10.26")), "omarchy update");
         assert_eq!(update_command_for(sys, home, "ID=arch\n", "2026.08.19", "2026.10.26", Some("2026.10.21")), "sudo pacman -Syu");
-        assert_eq!(update_command_for(sys, home, "ID=fedora\n", "2026.08.19", "2026.10.26", None), "uv tool install yt-dlp");
+        assert_eq!(
+            update_command_for(sys, home, "ID=fedora\n", "2026.08.19", "2026.10.26", None),
+            "uv tool install --force 'yt-dlp[default]'"
+        );
     }
 
     #[test]
@@ -1520,6 +1586,19 @@ mod tests {
         assert_eq!(version_in("ffmpeg version n9.0.2 Copyright (c) 2000-2026").as_deref(), Some("9.0.2"));
         assert_eq!(version_in("2.90.1").as_deref(), Some("2.90.1"));
         assert_eq!(version_in(""), None);
+    }
+
+    #[test]
+    fn challenge_hints() {
+        let omarchy = "ID=omarchy\nID_LIKE=arch\n";
+        assert_eq!(js_runtime_hint_for(omarchy), "omarchy-pkg-add deno");
+        assert_eq!(js_runtime_hint_for("ID=arch\n"), "sudo pacman -S deno");
+        assert!(js_runtime_hint_for("ID=ubuntu\n").contains("deno.com"));
+        let home = Path::new("/home/me");
+        let uv_copy = Path::new("/home/me/.local/bin/yt-dlp");
+        assert_eq!(challenge_solver_hint_for(uv_copy, home, omarchy), "uv tool install --force 'yt-dlp[default]'");
+        assert_eq!(challenge_solver_hint_for(Path::new("/usr/bin/yt-dlp"), home, omarchy), "omarchy-pkg-add yt-dlp-ejs");
+        assert_eq!(challenge_solver_hint_for(Path::new("/usr/bin/yt-dlp"), home, "ID=arch\n"), "sudo pacman -S yt-dlp-ejs");
     }
 
     #[test]

@@ -4,6 +4,15 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 `Cargo.toml`, shows in the window's footer, and each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- Setup check for YouTube's download challenges: Mixtape looks for a
+  JavaScript runtime (Deno, or Node, Bun or QuickJS, which it then tells
+  yt-dlp to use) and for yt-dlp's challenge solver (yt-dlp-ejs). If either is
+  missing, a notice shows the command that adds it; Dependencies lists both.
+- The "newer yt-dlp" hint installs `yt-dlp[default]`, which includes the
+  challenge solver (plain `uv tool install yt-dlp` leaves it out).
+
 ## 0.5.0
 
 - Settings: the list of programs moved to a **Dependencies** section at the

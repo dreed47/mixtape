@@ -34,6 +34,8 @@ enum Msg {
     Covers(Vec<(PathBuf, Option<PathBuf>)>),
     /// Each dependency's installed version and path, for Settings.
     Versions(Vec<(&'static str, Option<String>, Option<PathBuf>)>),
+    /// The JavaScript runtime yt-dlp can use, and whether its challenge solver is installed.
+    Challenges(Option<(&'static str, &'static str)>, bool),
 }
 
 /// What a click in the Library tree asks for.
@@ -249,6 +251,8 @@ struct App {
     covers_pending: HashSet<PathBuf>,
     /// Dependency versions and paths for Settings, read in the background.
     versions: HashMap<&'static str, (Option<String>, Option<PathBuf>)>,
+    /// What YouTube's download challenges need: (runtime, solver installed); None until checked.
+    challenges: Option<(Option<(&'static str, &'static str)>, bool)>,
     /// Downloads panel opened while nothing is downloading.
     downloads_open: bool,
 
@@ -344,6 +348,7 @@ impl App {
             covers_pending: HashSet::new(),
             downloads_open: false,
             versions: HashMap::new(),
+            challenges: None,
             tx,
             rx,
         };
@@ -495,6 +500,7 @@ impl App {
                 }
             }
             Msg::Ytdlp(outdated) => self.ytdlp_outdated = outdated,
+            Msg::Challenges(runtime, solver) => self.challenges = Some((runtime, solver)),
             Msg::Versions(found) => {
                 self.versions = found.into_iter().map(|(bin, v, p)| (bin, (v, p))).collect();
             }
@@ -1183,6 +1189,7 @@ impl App {
 
     /// Shown while a required tool is missing: what it's for and the command that installs it.
     fn setup_banner(&mut self, ui: &mut egui::Ui) {
+        self.challenge_banner(ui);
         let required: Vec<_> = self.missing.iter().copied().filter(|t| t.required).collect();
         if required.is_empty() {
             return;
@@ -1217,7 +1224,49 @@ impl App {
         ui.add_space(6.0);
     }
 
+    /// YouTube makes downloaders solve a JavaScript puzzle; without a runtime and yt-dlp's solver
+    /// scripts, some songs are missing formats or fail.
+    fn challenge_banner(&mut self, ui: &mut egui::Ui) {
+        let Some((runtime, solver)) = self.challenges else { return };
+        if runtime.is_some() && solver {
+            return;
+        }
+        let mut steps = Vec::new();
+        if runtime.is_none() {
+            steps.push(("a JavaScript runtime (Deno)", backend::js_runtime_hint()));
+        }
+        if !solver {
+            steps.push(("yt-dlp's challenge solver (yt-dlp-ejs)", backend::challenge_solver_hint()));
+        }
+        let warn = ui.visuals().warn_fg_color;
+        egui::Frame::group(ui.style()).stroke(egui::Stroke::new(1.5, warn)).inner_margin(12.0).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.colored_label(warn, egui::RichText::new("YouTube downloads need one more piece").strong());
+            ui.label(
+                "YouTube now has downloaders solve a small JavaScript puzzle. Without this, some songs download in lower quality or fail.",
+            );
+            for (what, how) in &steps {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!("•  {what}:"));
+                    if how.starts_with("See ") {
+                        ui.label(how);
+                    } else {
+                        ui.code(how);
+                        if ui.small_button("Copy").clicked() {
+                            ui.ctx().copy_text(how.clone());
+                        }
+                    }
+                });
+            }
+            if ui.button("Check again").clicked() {
+                self.read_versions(ui.ctx());
+            }
+        });
+        ui.add_space(6.0);
+    }
+
     fn read_versions(&self, ctx: &egui::Context) {
+        self.spawn(ctx, |_| Msg::Challenges(backend::js_runtime(), backend::challenge_solver_installed()));
         self.spawn(ctx, |_| {
             Msg::Versions(backend::TOOLS.iter().map(|t| (t.bin, backend::tool_version(t), backend::tool_path(t.bin))).collect())
         });
@@ -1496,6 +1545,19 @@ impl App {
                 };
                 let optional = if t.required { "" } else { " (optional)" };
                 ui.weak(format!("{}{optional}", t.needed_for));
+                ui.end_row();
+            }
+            if let Some((runtime, solver)) = self.challenges {
+                let (ok, bad) = (ui.visuals().hyperlink_color, ui.visuals().warn_fg_color);
+                ui.colored_label(if runtime.is_some() { ok } else { bad }, if runtime.is_some() { "✔" } else { "✖" });
+                ui.strong(runtime.map_or("JavaScript", |(bin, _)| bin));
+                ui.label(if runtime.is_some() { "found" } else { "not installed" });
+                ui.weak("solving YouTube's download puzzles (Deno, Node, Bun or QuickJS)");
+                ui.end_row();
+                ui.colored_label(if solver { ok } else { bad }, if solver { "✔" } else { "✖" });
+                ui.strong("yt-dlp-ejs");
+                ui.label(if solver { "found" } else { "not installed" });
+                ui.weak("yt-dlp's scripts for those puzzles");
                 ui.end_row();
             }
         });
