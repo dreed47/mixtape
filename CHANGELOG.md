@@ -4,7 +4,11 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 `Cargo.toml`, shows in the window's footer, and each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 0.6.0
+
+Known issue: the "downloads finished" desktop notification doesn't always
+appear yet (reported on a real hidden-workspace test; a scripted test did
+get it). Under investigation.
 
 - Downloads keep going while Mixtape is on another workspace or minimized,
   and the "finished" notification arrives then. On Wayland a hidden window
