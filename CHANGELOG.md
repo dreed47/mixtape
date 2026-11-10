@@ -4,7 +4,7 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 `Cargo.toml`, shows in the window's footer, and each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 0.5.0
 
 - Settings: the list of programs moved to a **Dependencies** section at the
   bottom, with each one's installed version (the path on hover). The page

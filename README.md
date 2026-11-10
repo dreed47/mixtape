@@ -7,7 +7,7 @@ MP3 into an `Artist/Album/` folder structure, and opens folders of your music
 in the player you choose. It follows the [Omarchy](https://omarchy.org) theme
 when Omarchy is installed and works on any Linux desktop otherwise.
 
-![Mixtape searching for Queen, with an album open and two songs downloading](docs/screenshot.png)
+![Mixtape searching for Johnny Cash: artists, albums with covers and song counts, and songs with previews](docs/screenshot.png)
 
 ## Features
 
