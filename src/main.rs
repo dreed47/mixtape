@@ -152,6 +152,10 @@ struct App {
     scanning: bool,
     selected: HashSet<PathBuf>,
     stems: bool,
+    /// A short confirmation ("Settings saved") and when it was shown; it fades after a few seconds.
+    notice: Option<(String, std::time::Instant)>,
+    /// Songs finished and failed since the queue was last empty.
+    batch: (usize, usize),
     /// Tools that weren't found at startup or at the last "Check again".
     missing: Vec<&'static backend::Tool>,
     /// Selected songs and folders waiting on "Move to Trash?".
@@ -208,6 +212,8 @@ impl App {
             selected: HashSet::new(),
             stems: backend::stems_installed(),
             missing: backend::missing_tools(),
+            notice: None,
+            batch: (0, 0),
             trash_confirm: None,
             update: Update::None,
             preview: Preview { mpv: backend::mpv_installed(), playing: None, clicked: None },
@@ -289,12 +295,22 @@ impl App {
                             self.status = Some(format!("Could not write the download log: {e}"));
                         }
                         self.logged.insert(song.id.clone());
+                        self.batch.0 += 1;
                         Job::Done(source)
                     }
-                    Err(e) => Job::Failed(e),
+                    Err(e) => {
+                        self.batch.1 += 1;
+                        Job::Failed(e)
+                    }
                 };
                 self.jobs.insert(song.id, job);
                 if self.queue.is_empty() && self.running == 0 {
+                    let (ok, failed) = std::mem::take(&mut self.batch);
+                    let songs = |n| if n == 1 { "1 song".to_string() } else { format!("{n} songs") };
+                    self.notify(match failed {
+                        0 => format!("Downloaded {}", songs(ok)),
+                        _ => format!("Downloaded {}, {} failed (see Downloads)", songs(ok), failed),
+                    });
                     self.rescan(ctx);
                 }
             }
@@ -312,7 +328,11 @@ impl App {
             }
             Msg::Trashed(paths, result) => {
                 match result.and_then(|_| backend::forget(&paths)) {
-                    Ok(()) => self.status = None,
+                    Ok(()) => {
+                        self.status = None;
+                        let n = paths.len();
+                        self.notify(if n == 1 { "Moved 1 item to the Trash".into() } else { format!("Moved {n} items to the Trash") });
+                    }
                     Err(e) => self.status = Some(format!("Could not move to the Trash: {e}")),
                 }
                 self.logged = backend::read_log();
@@ -441,7 +461,7 @@ impl App {
             }
         });
         if let Some(e) = &self.search_error {
-            ui.colored_label(ui.visuals().error_fg_color, format!("Search failed: {e}"));
+            error_line(ui, e);
         }
         ui.separator();
 
@@ -500,7 +520,7 @@ impl App {
                         load_album.push(a.album.id.clone());
                     }
                     if let Some(e) = &a.error {
-                        ui.colored_label(ui.visuals().error_fg_color, e);
+                        error_line(ui, e);
                     }
                     if a.open {
                         if let Some(tracks) = &mut a.tracks {
@@ -734,6 +754,10 @@ impl App {
         ui.add_space(6.0);
     }
 
+    fn notify(&mut self, text: String) {
+        self.notice = Some((text, std::time::Instant::now()));
+    }
+
     fn footer(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.weak(concat!("Mixtape ", env!("CARGO_PKG_VERSION")));
@@ -773,7 +797,7 @@ impl App {
                     }
                 }
                 Update::Failed(e) => {
-                    ui.colored_label(ui.visuals().error_fg_color, "· Update failed").on_hover_text(e);
+                    ui.colored_label(ui.visuals().error_fg_color, "· Update failed").on_hover_text(backend::friendly(e));
                     if ui.small_button("Dismiss").clicked() {
                         self.update = Update::None;
                     }
@@ -915,7 +939,10 @@ impl App {
             let folder_changed = self.draft.music_dir != self.settings.music_dir;
             self.settings = self.draft.clone();
             ui.ctx().set_zoom_factor(self.settings.text_scale);
-            self.status = self.settings.save().err().map(|e| format!("Could not save settings: {e}"));
+            match self.settings.save() {
+                Ok(()) => self.notify("Settings saved".into()),
+                Err(e) => self.status = Some(format!("Could not save settings: {e}")),
+            }
             if folder_changed {
                 self.selected.clear();
                 self.rescan(ui.ctx());
@@ -970,7 +997,14 @@ fn job_status(ui: &mut egui::Ui, job: Option<&Job>, have: bool) {
             ui.add(egui::ProgressBar::new(*f).desired_width(140.0).show_percentage());
         }
         Some(Job::Failed(e)) => {
-            ui.colored_label(ui.visuals().error_fg_color, "Failed").on_hover_text(e);
+            ui.colored_label(ui.visuals().error_fg_color, "Failed")
+                .on_hover_text(format!("{}\n\nRight-click to copy the details.", backend::friendly(e)))
+                .context_menu(|ui| {
+                    if ui.button("Copy error details").clicked() {
+                        ui.ctx().copy_text(e.clone());
+                        ui.close();
+                    }
+                });
         }
         Some(Job::Done(source)) => {
             let label = if source.is_empty() { "✔ Downloaded".to_string() } else { format!("✔ Downloaded · {source}") };
@@ -982,6 +1016,16 @@ fn job_status(ui: &mut egui::Ui, job: Option<&Job>, have: bool) {
         }
         None => {}
     }
+}
+
+/// An error in plain words, with a button that copies the full details for a bug report.
+fn error_line(ui: &mut egui::Ui, raw: &str) {
+    ui.horizontal_wrapped(|ui| {
+        ui.colored_label(ui.visuals().error_fg_color, backend::friendly(raw));
+        if ui.small_button("Copy details").on_hover_text("Copy the full error, for a bug report").clicked() {
+            ui.ctx().copy_text(raw.to_string());
+        }
+    });
 }
 
 /// A button filled with the theme accent, text dark or light for contrast.
@@ -1118,11 +1162,20 @@ impl eframe::App for App {
             self.setup_banner(ui);
             if let Some(s) = self.status.clone() {
                 ui.horizontal(|ui| {
-                    ui.colored_label(ui.visuals().error_fg_color, s);
-                    if ui.small_button("✖").clicked() {
+                    error_line(ui, &s);
+                    if ui.small_button("✖").on_hover_text("Dismiss").clicked() {
                         self.status = None;
                     }
                 });
+            }
+            const NOTICE_TIME: std::time::Duration = std::time::Duration::from_secs(4);
+            match &self.notice {
+                Some((text, shown)) if shown.elapsed() < NOTICE_TIME => {
+                    ui.colored_label(ui.visuals().hyperlink_color, format!("✔ {text}"));
+                    ui.ctx().request_repaint_after(NOTICE_TIME - shown.elapsed());
+                }
+                Some(_) => self.notice = None,
+                None => {}
             }
             ui.separator();
             match self.tab {

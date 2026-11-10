@@ -11,6 +11,12 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
   says what each is for and shows the install command for your distribution
   (Arch, Debian/Ubuntu, Fedora), with **Copy** and **Check again**.
   **Settings** lists every program Mixtape uses and whether it's installed.
+- Errors are in plain words: YouTube's bot check, songs that are unavailable,
+  private or blocked in your country, an outdated yt-dlp, no internet, a full
+  disk, a missing Trash. **Copy details** (or right-click a failed download)
+  copies the full error for a bug report.
+- Short confirmations: "Settings saved", "Moved 3 items to the Trash", and
+  "Downloaded 12 songs" when the queue finishes.
 - Library: a filter box (every word must match the artist, album or song
   name) and a **Recently added** view of the newest 200 songs.
 - Search: paste a YouTube or YouTube Music link to a song, album, playlist or

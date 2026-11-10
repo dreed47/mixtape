@@ -305,12 +305,53 @@ fn run(cmd: &mut Command) -> Result<String, String> {
         std::io::ErrorKind::NotFound => format!("{bin} is not installed (see README)"),
         _ => format!("could not start {bin}: {e}"),
     })?;
-    if out.status.success() { Ok(String::from_utf8_lossy(&out.stdout).into_owned()) } else { Err(last_line(&out.stderr)) }
+    if out.status.success() { Ok(String::from_utf8_lossy(&out.stdout).into_owned()) } else { Err(tail(&out.stderr)) }
 }
 
-fn last_line(stderr: &[u8]) -> String {
+/// The end of a program's error output: the details behind a failure, for "Copy details".
+fn tail(stderr: &[u8]) -> String {
     let s = String::from_utf8_lossy(stderr);
-    s.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("failed").trim().to_string()
+    let lines: Vec<&str> = s.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
+    let text = lines[lines.len().saturating_sub(40)..].join("\n");
+    if text.is_empty() { "failed with no message".into() } else { text }
+}
+
+/// A plain-language version of an error from yt-dlp, ytmusicapi, uv or gio. The raw text stays
+/// available for "Copy details".
+pub fn friendly(raw: &str) -> String {
+    let has = |needles: &[&str]| needles.iter().any(|n| raw.to_lowercase().contains(&n.to_lowercase()));
+    let known = if has(&["not a bot"]) {
+        Some("YouTube wants to confirm you're not a bot. Wait a while and try again, or turn on the Premium login in Settings so yt-dlp uses your browser's sign-in.")
+    } else if has(&["in your country", "not made this video available"]) {
+        Some("This song isn't available in your country.")
+    } else if has(&["private video"]) {
+        Some("This song is private on YouTube.")
+    } else if has(&["video unavailable", "video is unavailable", "video is not available", "has been removed"]) {
+        Some("This song isn't available on YouTube anymore.")
+    } else if has(&["confirm your age", "age-restricted"]) {
+        Some("YouTube needs a signed-in adult account for this song. Turn on the Premium login in Settings to use your browser's sign-in.")
+    } else if has(&["cookie", "failed to decrypt"]) {
+        Some("yt-dlp couldn't read your YouTube login from the browser chosen in Settings. Check that you're signed in to music.youtube.com there, or turn off the Premium login.")
+    } else if has(&["http error 403", "signature extraction", "nsig extraction", "requested format is not available", "unable to extract"]) {
+        Some("YouTube changed something this version of yt-dlp can't handle yet. Updating yt-dlp usually fixes it.")
+    } else if has(&["name resolution", "name or service not known", "network is unreachable", "connectionerror", "timed out", "connection refused", "failed to fetch"]) {
+        Some("Couldn't reach YouTube. Check your internet connection.")
+    } else if has(&["no space left"]) {
+        Some("The disk with your music folder is full.")
+    } else if has(&["permission denied", "read-only file system"]) {
+        Some("Mixtape isn't allowed to write to that folder.")
+    } else if has(&["trash directory", "trashing on system internal mounts is not supported"]) {
+        Some("That folder has no Trash (common on network shares), so nothing was moved.")
+    } else {
+        None
+    };
+    known.map(String::from).unwrap_or_else(|| {
+        let last = raw.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or(raw).trim();
+        let last = last.strip_prefix("ERROR: ").unwrap_or(last);
+        // "[youtube] abc123: message" -> "message"
+        let last = if last.starts_with('[') { last.split_once("]: ").or(last.split_once(": ")).map_or(last, |p| p.1) } else { last };
+        last.to_string()
+    })
 }
 
 fn ytmusic(mode: &str, arg: &str) -> Result<String, String> {
@@ -441,7 +482,7 @@ pub fn download(settings: &Settings, s: &Song, progress: impl Fn(f32)) -> Result
     match (status.success(), saved) {
         (true, Some(path)) => Ok(Downloaded { path, source }),
         (true, None) => Err("yt-dlp finished without saving a file".into()),
-        (false, _) => Err(last_line(&stderr)),
+        (false, _) => Err(tail(&stderr)),
     }
 }
 
@@ -795,6 +836,18 @@ mod tests {
         assert_eq!(cmd.as_deref(), Some("sudo apt install yt-dlp ffmpeg"));
         assert!(notes[0].contains("docs.astral.sh/uv"));
         assert_eq!(install_hint_for(Distro::Other, &[ytdlp]).0, None);
+    }
+
+    #[test]
+    fn friendly_errors() {
+        assert!(friendly("ERROR: [youtube] abc: Sign in to confirm you’re not a bot.").contains("not a bot"));
+        assert!(friendly("WARNING: x\nERROR: [youtube] abc: Video unavailable").starts_with("This song isn't available on YouTube"));
+        assert!(friendly("requests.exceptions.ConnectionError: Max retries").contains("internet"));
+        assert!(friendly("ERROR: unable to download video data: HTTP Error 403: Forbidden").contains("Updating yt-dlp"));
+        assert!(friendly("ERROR: [youtube] aaaaaaaaaaa: This video is unavailable").starts_with("This song isn't available"));
+        assert_eq!(friendly("ERROR: [youtube] abc123: Something new"), "Something new");
+        assert_eq!(friendly("That isn't a YouTube or YouTube Music link."), "That isn't a YouTube or YouTube Music link.");
+        assert_eq!(tail(b""), "failed with no message");
     }
 
     #[test]
