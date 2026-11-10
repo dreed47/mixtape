@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -344,6 +345,18 @@ fn tail(stderr: &[u8]) -> String {
     if text.is_empty() { "failed with no message".into() } else { text }
 }
 
+/// Stops a download started by `download`: yt-dlp and the ffmpeg it runs. The .part file stays,
+/// so downloading the song again continues it.
+pub fn stop(pid: u32) {
+    let _ = Command::new("kill").args(["-TERM", "--"]).arg(format!("-{pid}")).stderr(Stdio::null()).status();
+}
+
+/// YouTube is rate-limiting or asking for a bot check: more downloads right now would fail too.
+pub fn is_blocked(raw: &str) -> bool {
+    let raw = raw.to_lowercase();
+    ["not a bot", "http error 429", "too many requests"].iter().any(|n| raw.contains(n))
+}
+
 /// A plain-language version of an error from yt-dlp, ytmusicapi, uv or gio. The raw text stays
 /// available for "Copy details".
 pub fn friendly(raw: &str) -> String {
@@ -464,7 +477,15 @@ pub struct Downloaded {
 }
 
 /// Downloads one song to <music_dir>/Artist/Album/Title.<ext>, reporting progress 0..1.
-pub fn download(settings: &Settings, s: &Song, progress: impl Fn(f32)) -> Result<Downloaded, String> {
+/// `overwrite` replaces a file that's already there ("Download again"); yt-dlp keeps it otherwise.
+/// `started` gets yt-dlp's process id, which is also its process group, for `stop`.
+pub fn download(
+    settings: &Settings,
+    s: &Song,
+    overwrite: bool,
+    started: impl FnOnce(u32),
+    progress: impl Fn(f32),
+) -> Result<Downloaded, String> {
     if !safe_id(&s.id, 11) {
         return Err(format!("bad video id {:?}", s.id));
     }
@@ -485,6 +506,9 @@ pub fn download(settings: &Settings, s: &Song, progress: impl Fn(f32)) -> Result
         // Embedding art in Opus needs Python's mutagen, which many installs lack; a cover.jpg beside the songs works in every player.
         Format::Original => cmd.args(["--write-thumbnail", "-o"]).arg(format!("thumbnail:{artist}/{album}/cover.%(ext)s")),
     };
+    if overwrite {
+        cmd.arg("--force-overwrites");
+    }
     if !settings.cookies_browser.is_empty() {
         if !BROWSERS.iter().any(|b| b.1 == settings.cookies_browser) {
             return Err(format!("unknown browser {:?} in Settings", settings.cookies_browser));
@@ -503,8 +527,10 @@ pub fn download(settings: &Settings, s: &Song, progress: impl Fn(f32)) -> Result
         .arg(format!("https://music.youtube.com/watch?v={}", s.id))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0) // its own group, so stopping it also stops the ffmpeg it runs
         .spawn()
         .map_err(|e| format!("could not start yt-dlp: {e}"))?;
+    started(child.id());
     let mut stderr = child.stderr.take().unwrap();
     let errors = std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -990,6 +1016,13 @@ pub fn scan(dir: &Path) -> Scan {
     Scan { keys, root, all }
 }
 
+/// Demucs (and Stems) name the parts of a split song like this.
+const STEM_NAMES: [&str; 6] = ["vocals", "drums", "bass", "other", "guitar", "piano"];
+
+fn is_stems_folder(files: &[PathBuf]) -> bool {
+    files.len() >= 2 && files.iter().all(|f| f.file_stem().is_some_and(|s| STEM_NAMES.iter().any(|n| s.eq_ignore_ascii_case(n))))
+}
+
 fn walk(dir: &Path, name: String, keys: &mut HashSet<String>, songs: &mut Vec<(PathBuf, std::time::SystemTime)>) -> Folder {
     let mut folder = Folder { name, path: dir.to_path_buf(), children: vec![], files: vec![] };
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -1003,9 +1036,15 @@ fn walk(dir: &Path, name: String, keys: &mut HashSet<String>, songs: &mut Vec<(P
         if kind.is_dir() {
             folder.children.push(walk(&path, name, keys, songs));
         } else if path.extension().is_some_and(|x| AUDIO_EXTS.iter().any(|a| x.eq_ignore_ascii_case(a))) {
-            let changed = entry.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
-            songs.push((path.clone(), changed));
             folder.files.push(path.clone());
+        }
+    }
+    // A folder of stems (vocals.wav, drums.wav, …) is one song split apart, not songs: it stays in
+    // the tree but isn't counted, matched or checked for duplicates.
+    if !is_stems_folder(&folder.files) {
+        for path in &folder.files {
+            let changed = path.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+            songs.push((path.clone(), changed));
             let stem = path.file_stem().unwrap_or_default().to_string_lossy();
             let title = stem.trim_start_matches(|c: char| c.is_ascii_digit() || " -.".contains(c)); // "01 - Title"
             let dir_name = |p: Option<&Path>| p.and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -1206,6 +1245,40 @@ mod tests {
         assert_eq!(newer_ytdlp("2026.10.26", tags, day("2026.11.10")), None); // up to date
         assert_eq!(newer_ytdlp("2026.08.19", tags, day("2026.09.01")), None); // only 13 days old
         assert_eq!(newer_ytdlp("2026.08.19", tags, day("2026.10.30")), None); // newest only 4 days out
+    }
+
+    #[test]
+    fn stems_folders_are_not_songs() {
+        let dir = std::env::temp_dir().join(format!("mixtape-stems-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Stems/Heaven Is (6 stems)")).unwrap();
+        std::fs::create_dir_all(dir.join("Band/Album")).unwrap();
+        for n in ["vocals", "drums", "bass", "other", "guitar", "piano"] {
+            std::fs::write(dir.join(format!("Stems/Heaven Is (6 stems)/{n}.wav")), "").unwrap();
+        }
+        std::fs::write(dir.join("Band/Album/Bass.mp3"), "").unwrap(); // a song called "Bass" alone isn't a stems folder
+        let s = scan(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(s.all.len(), 1);
+        assert!(!s.keys.contains(&key("stems", "vocals")));
+        assert_eq!(s.root.children[1].children[0].files.len(), 6); // still shown in the tree
+        assert!(is_blocked("ERROR: [youtube] x: Sign in to confirm you're not a bot"));
+        assert!(!is_blocked("ERROR: Video unavailable"));
+    }
+
+    #[test]
+    fn stop_ends_the_whole_process_group() {
+        // A shell that starts a child, like yt-dlp starting ffmpeg.
+        let mut child = Command::new("sh").args(["-c", "sleep 30 & wait"]).process_group(0).spawn().unwrap();
+        stop(child.id());
+        let started = std::time::Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(5), "still running");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // Nothing from that group is left (pgrep -g exits 1 when it finds none).
+        let left = Command::new("pgrep").arg("-g").arg(child.id().to_string()).output().unwrap();
+        assert!(!left.status.success(), "left behind: {}", String::from_utf8_lossy(&left.stdout));
     }
 
     #[test]

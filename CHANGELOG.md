@@ -6,6 +6,17 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 
 ## Unreleased
 
+- **Download selected** waits ("Loading tracks…") until every ticked album's
+  track list has loaded, so an album still loading is no longer dropped.
+- Closing Mixtape stops its downloads (yt-dlp and the ffmpeg it runs); they
+  resume from the partial file next time instead of a second copy writing
+  the same file. Running downloads have **Cancel** too.
+- A bot check or rate limit from YouTube pauses the queue, with **Resume**,
+  instead of failing every song after it.
+- **Download again** replaces the file on disk (it used to keep the old one).
+- Stems folders (vocals, drums, bass, other, guitar, piano) stay in the
+  Library tree but no longer count as songs, match "In library", or show up
+  as duplicates.
 - The search helper asks uv for ytmusicapi 1.x (`>=1.12,<2`), so a future 2.0
   can't break search before Mixtape is checked against it.
 - Keyboard shortcuts: Ctrl+1 / Ctrl+2 / Ctrl+, for the tabs, Ctrl+F for the

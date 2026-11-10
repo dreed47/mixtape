@@ -46,6 +46,39 @@ enum Update {
     Failed(String),
 }
 
+/// Process ids of the yt-dlp downloads running now. Dropping it (when Mixtape closes) stops them,
+/// so the saved queue resumes them next time instead of a second copy writing the same file.
+#[derive(Default, Clone)]
+struct Running(std::sync::Arc<std::sync::Mutex<HashMap<String, u32>>>);
+
+impl Running {
+    fn set(&self, id: &str, pid: Option<u32>) {
+        if let Ok(mut map) = self.0.lock() {
+            match pid {
+                Some(pid) => map.insert(id.to_string(), pid),
+                None => map.remove(id),
+            };
+        }
+    }
+
+    fn stop(&self, id: &str) {
+        if let Some(pid) = self.0.lock().ok().and_then(|m| m.get(id).copied()) {
+            backend::stop(pid);
+        }
+    }
+}
+
+/// Owns the running downloads; stops them when the window closes.
+struct Downloads(Running);
+
+impl Drop for Downloads {
+    fn drop(&mut self) {
+        if let Ok(map) = self.0.0.lock() {
+            map.values().for_each(|pid| backend::stop(*pid));
+        }
+    }
+}
+
 /// Plays one search result at a time through mpv, without saving it.
 struct Preview {
     mpv: bool,
@@ -187,6 +220,13 @@ struct App {
     trash_confirm: Option<Vec<PathBuf>>,
     update: Update,
     preview: Preview,
+    downloads: Downloads,
+    /// Running downloads the user cancelled; their failure isn't reported.
+    cancelled: HashSet<String>,
+    /// Songs to replace on disk ("Download again").
+    overwrite: HashSet<String>,
+    /// Why new downloads aren't starting (YouTube's bot check or rate limit), until Resume.
+    paused: Option<String>,
     /// When GitHub was last asked for a newer release.
     update_checked: Option<std::time::Instant>,
     /// Format, bitrate, length and size of songs shown in the Library, read in the background.
@@ -250,6 +290,10 @@ impl App {
             batch: (0, 0),
             trash_confirm: None,
             update: Update::None,
+            downloads: Downloads(Running::default()),
+            cancelled: HashSet::new(),
+            overwrite: HashSet::new(),
+            paused: None,
             preview: Preview { mpv: backend::mpv_installed(), playing: None, clicked: None, hovered: None },
             update_checked: None,
             details: HashMap::new(),
@@ -330,6 +374,18 @@ impl App {
             }
             Msg::Done(song, result) => {
                 self.running -= 1;
+                if self.cancelled.remove(&song.id) {
+                    self.jobs.remove(&song.id);
+                    self.history.retain(|s| s.id != song.id);
+                    self.save_queue();
+                    return;
+                }
+                if let Err(e) = &result
+                    && backend::is_blocked(e)
+                    && self.paused.is_none()
+                {
+                    self.paused = Some(backend::friendly(e));
+                }
                 let job = match result {
                     Ok(backend::Downloaded { path, source }) => {
                         if let Err(e) = backend::append_log(&song.id, &path) {
@@ -454,7 +510,15 @@ impl App {
     }
 
     fn downloads_panel(&mut self, ui: &mut egui::Ui) {
-        let (mut retry, mut cancel) = (None, None);
+        let (mut retry, mut cancel, mut stop) = (None, None, None);
+        if let Some(why) = self.paused.clone() {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(ui.visuals().warn_fg_color, format!("Downloads paused. {why}"));
+                if ui.button("Resume").clicked() {
+                    self.paused = None;
+                }
+            });
+        }
         ui.horizontal(|ui| {
             ui.heading("Downloads");
             let waiting = self.queue.len();
@@ -479,6 +543,7 @@ impl App {
                         match self.jobs.get(&song.id) {
                             Some(Job::Failed(_)) if ui.small_button("Retry").clicked() => retry = Some(song.clone()),
                             Some(Job::Queued) if ui.small_button("Cancel").clicked() => cancel = Some(Some(song.id.clone())),
+                            Some(Job::Running(_)) if ui.small_button("Cancel").clicked() => stop = Some(song.id.clone()),
                             _ => {}
                         }
                         job_status(ui, self.jobs.get(&song.id), false);
@@ -497,22 +562,40 @@ impl App {
         if let Some(only) = cancel {
             self.cancel_waiting(only.as_deref());
         }
+        if let Some(id) = stop {
+            self.cancel_running(&id);
+        }
     }
 
     fn start_downloads(&mut self, ctx: &egui::Context) {
-        while self.running < PARALLEL_DOWNLOADS {
+        while self.running < PARALLEL_DOWNLOADS && self.paused.is_none() {
             let Some(song) = self.queue.pop_front() else { break };
             self.running += 1;
             self.jobs.insert(song.id.clone(), Job::Running(0.0));
             let settings = self.settings.clone();
+            let overwrite = self.overwrite.remove(&song.id);
+            let running = self.downloads.0.clone();
             self.spawn(ctx, move |tx| {
                 let id = song.id.clone();
-                let result = backend::download(&settings, &song, |f| {
-                    let _ = tx.send(Msg::Progress(id.clone(), f));
-                });
+                let result = backend::download(
+                    &settings,
+                    &song,
+                    overwrite,
+                    |pid| running.set(&id, Some(pid)),
+                    |f| {
+                        let _ = tx.send(Msg::Progress(id.clone(), f));
+                    },
+                );
+                running.set(&id, None);
                 Msg::Done(song, result)
             });
         }
+    }
+
+    /// Stops a download that's running; the song drops out of the list.
+    fn cancel_running(&mut self, id: &str) {
+        self.cancelled.insert(id.to_string());
+        self.downloads.0.stop(id);
     }
 
     fn search_tab(&mut self, ui: &mut egui::Ui) {
@@ -540,10 +623,13 @@ impl App {
             let rows = self.songs.iter().chain(self.albums.iter().flat_map(|a| a.tracks.iter().flatten()));
             rows.filter(|r| r.checked && seen.insert(r.song.id.clone())).map(|r| r.song.clone()).collect()
         };
+        // A ticked album counts once its track list has loaded; until then downloading would leave it out.
+        let loading = self.albums.iter().any(|a| a.checked && a.tracks.is_none() && a.error.is_none());
         ui.horizontal(|ui| {
-            let label = format!("Download selected ({})", selected.len());
-            let clicked = ui.add_enabled(!selected.is_empty(), accent_button(ui, label)).on_hover_text("Ctrl+D").clicked();
-            if (clicked || std::mem::take(&mut self.download_now)) && !selected.is_empty() {
+            let label = if loading { "Loading tracks…".to_string() } else { format!("Download selected ({})", selected.len()) };
+            let ready = !selected.is_empty() && !loading;
+            let clicked = ui.add_enabled(ready, accent_button(ui, label)).on_hover_text("Ctrl+D").clicked();
+            if (clicked || std::mem::take(&mut self.download_now)) && ready {
                 selected.into_iter().for_each(|song| self.enqueue(song));
                 self.rows_mut().for_each(|r| r.checked = false);
                 self.albums.iter_mut().for_each(|a| a.checked = false);
@@ -691,6 +777,7 @@ impl App {
         if let Some(yes) = answer {
             if yes {
                 self.rows_mut().filter(|r| r.song.id == song.id).for_each(|r| r.checked = true);
+                self.overwrite.insert(song.id.clone());
             }
             self.confirm = None;
         }
