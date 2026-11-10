@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Mixtape
+Comment=Search YouTube Music and download songs into your music library
+Exec=mixtape
+Icon=audio-x-generic
+Terminal=false
+Categories=AudioVideo;Audio;
+StartupWMClass=mixtape
