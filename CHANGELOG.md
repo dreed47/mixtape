@@ -6,6 +6,17 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 
 ## Unreleased
 
+- Settings: the list of programs moved to a **Dependencies** section at the
+  bottom, with each one's installed version (the path on hover). The page
+  scrolls when the window is short.
+- Album results show how many songs they have; their track lists load in
+  the background (three at a time), so opening one is instant.
+- The Downloads panel is one line when nothing is downloading, with **Show**;
+  it opens by itself when downloads start.
+- Inside an open album, tracks show their number, title and length; the
+  artist and album are already on the album row.
+- Album folders in the Library show their cover (cover.jpg, or the art
+  inside the first song, cached in ~/.cache/mixtape/covers).
 - Cleaner files: no more YouTube description, link, upload date or "Music"
   genre in the tags; the date is the album's year instead.
 - Video endings come off titles: (Official Audio), (Official Video),

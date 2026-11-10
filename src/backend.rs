@@ -215,6 +215,26 @@ pub fn tool_installed(t: &Tool) -> bool {
     on_path(t.bin)
 }
 
+/// Where a program is on PATH (the one Mixtape runs).
+pub fn tool_path(bin: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(bin)).find(|f| f.is_file())
+}
+
+/// The installed version, from the program's own --version (ffmpeg and ffprobe say -version).
+pub fn tool_version(t: &Tool) -> Option<String> {
+    let flag = if t.bin.starts_with("ff") { "-version" } else { "--version" };
+    let out = Command::new(t.bin).arg(flag).stderr(Stdio::null()).output().ok()?;
+    version_in(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The first word with a digit on the first line, without a leading v or n:
+/// "uv 0.13.7 (x86_64…)" -> "0.13.7", "ffmpeg version n9.0.2 …" -> "9.0.2", "2026.10.26" -> itself.
+fn version_in(output: &str) -> Option<String> {
+    let word = output.lines().next()?.split_whitespace().find(|w| w.chars().any(|c| c.is_ascii_digit()))?;
+    let word = word.strip_prefix(['v', 'n']).filter(|w| w.starts_with(|c: char| c.is_ascii_digit())).unwrap_or(word);
+    Some(word.to_string())
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Distro {
     Arch,
@@ -904,6 +924,38 @@ struct CacheEntry {
     info: AudioInfo,
 }
 
+/// A picture for an album folder: its cover.jpg (or folder.jpg / front.jpg), else the art inside
+/// its first song, pulled out once with ffmpeg into ~/.cache/mixtape/covers.
+pub fn folder_cover(folder: &Path, files: &[PathBuf]) -> Option<PathBuf> {
+    for name in ["cover.jpg", "folder.jpg", "front.jpg", "cover.png"] {
+        let file = folder.join(name);
+        if file.is_file() {
+            return Some(file);
+        }
+    }
+    let song = files.first()?;
+    let changed = song.metadata().and_then(|m| m.modified()).map(stamp).unwrap_or(0);
+    let id = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (song, changed).hash(&mut h);
+        h.finish()
+    };
+    let out = xdg("XDG_CACHE_HOME", ".cache").join(format!("mixtape/covers/{id:016x}.jpg"));
+    if out.is_file() {
+        return Some(out);
+    }
+    std::fs::create_dir_all(out.parent()?).ok()?;
+    let ok = Command::new("ffmpeg")
+        .args(["-y", "-v", "error", "-i"])
+        .arg(song)
+        .args(["-an", "-map", "0:v:0", "-frames:v", "1", "-vf", "scale=128:-1"])
+        .arg(&out)
+        .status()
+        .is_ok_and(|s| s.success());
+    (ok && out.is_file()).then_some(out)
+}
+
 fn cache_file() -> PathBuf {
     xdg("XDG_CACHE_HOME", ".cache").join("mixtape/songs.json")
 }
@@ -1458,6 +1510,16 @@ mod tests {
         assert_eq!(youtube_id_in(json).as_deref(), Some("xt0V0_1MS0Q"));
         assert_eq!(youtube_id_in("watch?v=short"), None);
         assert_eq!(youtube_id_in("{}"), None);
+    }
+
+    #[test]
+    fn reads_tool_versions() {
+        assert_eq!(version_in("uv 0.13.7 (x86_64-unknown-linux-gnu)").as_deref(), Some("0.13.7"));
+        assert_eq!(version_in("2026.10.26\n").as_deref(), Some("2026.10.26"));
+        assert_eq!(version_in("mpv v0.41.0 Copyright © 2000-2025").as_deref(), Some("0.41.0"));
+        assert_eq!(version_in("ffmpeg version n9.0.2 Copyright (c) 2000-2026").as_deref(), Some("9.0.2"));
+        assert_eq!(version_in("2.90.1").as_deref(), Some("2.90.1"));
+        assert_eq!(version_in(""), None);
     }
 
     #[test]

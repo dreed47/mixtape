@@ -30,6 +30,10 @@ enum Msg {
     /// Fix tags finished looking up songs; how many it couldn't.
     ResolveDone(usize),
     Probed(Vec<(PathBuf, backend::AudioInfo)>),
+    /// Album folders and their cover picture, if they have one.
+    Covers(Vec<(PathBuf, Option<PathBuf>)>),
+    /// Each dependency's installed version and path, for Settings.
+    Versions(Vec<(&'static str, Option<String>, Option<PathBuf>)>),
 }
 
 /// What a click in the Library tree asks for.
@@ -240,6 +244,13 @@ struct App {
     /// Format, bitrate, length and size of songs shown in the Library, read in the background.
     details: HashMap<PathBuf, backend::AudioInfo>,
     probing: HashSet<PathBuf>,
+    /// Cover picture for each album folder shown in the Library (None: it has none).
+    covers: HashMap<PathBuf, Option<PathBuf>>,
+    covers_pending: HashSet<PathBuf>,
+    /// Dependency versions and paths for Settings, read in the background.
+    versions: HashMap<&'static str, (Option<String>, Option<PathBuf>)>,
+    /// Downloads panel opened while nothing is downloading.
+    downloads_open: bool,
 
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
@@ -329,11 +340,16 @@ impl App {
             update_checked: None,
             details: HashMap::new(),
             probing: HashSet::new(),
+            covers: HashMap::new(),
+            covers_pending: HashSet::new(),
+            downloads_open: false,
+            versions: HashMap::new(),
             tx,
             rx,
         };
         app.rescan(ctx);
         app.spawn(ctx, |_| Msg::Ytdlp(backend::ytdlp_outdated()));
+        app.read_versions(ctx);
         let resumed = backend::load_queue();
         if !resumed.is_empty() {
             let n = resumed.len();
@@ -455,6 +471,7 @@ impl App {
                 self.scanning = false;
                 self.selected.retain(|p| p.starts_with(&scan.root.path));
                 self.details.clear(); // files may have changed; read again when shown
+                self.covers.clear();
                 self.indexing = true;
                 let (root, all) = (scan.root.path.clone(), scan.all.clone());
                 self.scan = Some(scan);
@@ -478,6 +495,15 @@ impl App {
                 }
             }
             Msg::Ytdlp(outdated) => self.ytdlp_outdated = outdated,
+            Msg::Versions(found) => {
+                self.versions = found.into_iter().map(|(bin, v, p)| (bin, (v, p))).collect();
+            }
+            Msg::Covers(found) => {
+                for (folder, cover) in found {
+                    self.covers_pending.remove(&folder);
+                    self.covers.insert(folder, cover);
+                }
+            }
             Msg::Probed(found) => {
                 for (path, info) in found {
                     self.probing.remove(&path);
@@ -573,6 +599,9 @@ impl App {
         }
         ui.horizontal(|ui| {
             ui.heading("Downloads");
+            if self.running + self.queue.len() == 0 && self.paused.is_none() && ui.small_button("Hide").clicked() {
+                self.downloads_open = false;
+            }
             let waiting = self.queue.len();
             if waiting > 0 && ui.button(format!("Cancel waiting ({waiting})")).on_hover_text("Songs already downloading finish").clicked() {
                 cancel = Some(None);
@@ -756,12 +785,19 @@ impl App {
                             cover(ui, &a.album.thumb, 48.0);
                             ui.vertical(|ui| {
                                 fit(ui, egui::RichText::new(&a.album.title).strong());
-                                fit(ui, format!("{}  ·  {} {}", a.album.artists, a.album.kind, a.album.year));
+                                let count = match &a.tracks {
+                                    Some(t) if t.len() == 1 => "  ·  1 song".to_string(),
+                                    Some(t) => format!("  ·  {} songs", t.len()),
+                                    None => String::new(),
+                                };
+                                fit(ui, format!("{}  ·  {} {}{count}", a.album.artists, a.album.kind, a.album.year));
                             });
                         },
                     );
-                    if (a.open || a.checked) && a.tracks.is_none() && !a.loading && a.error.is_none() {
-                        load_album.push(a.album.id.clone());
+                    // Every album's track list loads in the background (for its song count and an instant
+                    // open); opened and ticked ones go first.
+                    if a.tracks.is_none() && !a.loading && a.error.is_none() {
+                        load_album.push((!(a.open || a.checked), a.album.id.clone()));
                     }
                     if let Some(e) = &a.error {
                         error_line(ui, e);
@@ -793,7 +829,8 @@ impl App {
         if let Some(song) = wants_confirm {
             self.confirm = Some(song);
         }
-        for id in load_album.into_iter().take(3usize.saturating_sub(self.album_loads)) {
+        load_album.sort_by_key(|(later, _)| *later); // stable: otherwise in display order
+        for (_, id) in load_album.into_iter().take(3usize.saturating_sub(self.album_loads)) {
             if let Some(a) = self.albums.iter_mut().find(|a| a.album.id == id) {
                 a.loading = true;
             }
@@ -917,6 +954,9 @@ impl App {
             details: &self.details,
             probing: &self.probing,
             wanted: vec![],
+            covers: &self.covers,
+            covers_pending: &self.covers_pending,
+            wanted_covers: vec![],
         };
         let filter = self.library_filter.trim();
         let flat: Option<Vec<&PathBuf>> = if !filter.is_empty() {
@@ -971,7 +1011,21 @@ impl App {
                 }
             }
         });
-        let (action, wanted) = (tree.action, tree.wanted);
+        let (action, wanted, wanted_covers) = (tree.action, tree.wanted, tree.wanted_covers);
+        if !wanted_covers.is_empty() {
+            self.covers_pending.extend(wanted_covers.iter().map(|(f, _)| f.clone()));
+            self.spawn(ui.ctx(), move |_| {
+                Msg::Covers(
+                    wanted_covers
+                        .into_iter()
+                        .map(|(folder, files)| {
+                            let cover = backend::folder_cover(&folder, &files);
+                            (folder, cover)
+                        })
+                        .collect(),
+                )
+            });
+        }
         if !wanted.is_empty() {
             self.probing.extend(wanted.iter().cloned());
             self.spawn(ui.ctx(), move |_| {
@@ -1157,9 +1211,16 @@ impl App {
                 self.missing = backend::missing_tools();
                 self.stems = backend::stems_installed();
                 self.preview.mpv = backend::mpv_installed();
+                self.read_versions(ui.ctx());
             }
         });
         ui.add_space(6.0);
+    }
+
+    fn read_versions(&self, ctx: &egui::Context) {
+        self.spawn(ctx, |_| {
+            Msg::Versions(backend::TOOLS.iter().map(|t| (t.bin, backend::tool_version(t), backend::tool_path(t.bin))).collect())
+        });
     }
 
     fn notify(&mut self, text: String) {
@@ -1360,25 +1421,6 @@ impl App {
             });
             ui.end_row();
 
-            ui.label("Programs");
-            ui.vertical(|ui| {
-                for t in &backend::TOOLS {
-                    let (mark, color) = if backend::tool_installed(t) {
-                        ("✔", ui.visuals().hyperlink_color)
-                    } else if t.required {
-                        ("✖", ui.visuals().error_fg_color)
-                    } else {
-                        ("–", ui.visuals().weak_text_color())
-                    };
-                    let optional = if t.required { "" } else { " (optional)" };
-                    ui.horizontal(|ui| {
-                        ui.colored_label(color, mark);
-                        ui.label(format!("{} for {}{optional}", t.bin, t.needed_for));
-                    });
-                }
-            });
-            ui.end_row();
-
             ui.label("Text size");
             ui.horizontal(|ui| {
                 let slider = ui.add(
@@ -1426,6 +1468,37 @@ impl App {
             ui.colored_label(ui.visuals().warn_fg_color, "That folder doesn't exist, so the music folder hasn't changed.");
         }
         ui.weak("Changes are saved automatically.");
+        ui.add_space(16.0);
+        ui.separator();
+        ui.heading("Dependencies");
+        ui.weak("Programs Mixtape runs. Point at one to see which copy it uses.");
+        ui.add_space(4.0);
+        egui::Grid::new("dependencies").num_columns(4).spacing([14.0, 6.0]).show(ui, |ui| {
+            for t in &backend::TOOLS {
+                let (version, path) = self.versions.get(t.bin).cloned().unwrap_or_default();
+                let installed = path.is_some() || (self.versions.is_empty() && backend::tool_installed(t));
+                let (mark, color) = if installed {
+                    ("✔", ui.visuals().hyperlink_color)
+                } else if t.required {
+                    ("✖", ui.visuals().error_fg_color)
+                } else {
+                    ("–", ui.visuals().weak_text_color())
+                };
+                ui.colored_label(color, mark);
+                let name = ui.strong(t.bin);
+                if let Some(path) = &path {
+                    name.on_hover_text(path.display().to_string());
+                }
+                match (&version, installed) {
+                    (Some(v), _) => ui.label(v),
+                    (None, true) => ui.weak("…"),
+                    (None, false) => ui.weak("not installed"),
+                };
+                let optional = if t.required { "" } else { " (optional)" };
+                ui.weak(format!("{}{optional}", t.needed_for));
+                ui.end_row();
+            }
+        });
         if self.settings != before
             && let Err(e) = self.settings.save()
         {
@@ -1454,9 +1527,13 @@ fn song_row(ui: &mut egui::Ui, row_: &mut Row, lib: &Lib, from_album: bool, want
     let have = if from_album { in_album(lib.logged, lib.music_dir, &row_.song) } else { in_library(lib.logged, lib.scan, &row_.song) };
     let other_copy = if from_album && !have { elsewhere(lib.scan, &row_.song) } else { None };
     let id = row_.song.id.clone();
+    let row_duration = row_.song.duration.clone();
     let hovered = row(
         ui,
         |ui| {
+            if from_album {
+                ui.weak(&row_duration);
+            }
             job_status(ui, lib.jobs.get(&id), have);
             if let Some(album) = &other_copy
                 && lib.jobs.get(&id).is_none()
@@ -1476,6 +1553,13 @@ fn song_row(ui: &mut egui::Ui, row_: &mut Row, lib: &Lib, from_album: bool, want
                 if ui.button(icon).on_hover_text(tip).clicked() {
                     preview.clicked = Some(id.clone());
                 }
+            }
+            // Inside an open album the album row already says who and what: just number and title.
+            if from_album {
+                let number = row_.song.track.map(|n| format!("{n:02}")).unwrap_or_default();
+                ui.add_sized([22.0, 18.0], egui::Label::new(egui::RichText::new(number).weak()));
+                fit(ui, egui::RichText::new(&row_.song.title).strong());
+                return;
             }
             cover(ui, &row_.song.thumb, 40.0);
             ui.vertical(|ui| {
@@ -1642,6 +1726,10 @@ struct Tree<'a> {
     probing: &'a HashSet<PathBuf>,
     /// Shown songs whose details haven't been read yet.
     wanted: Vec<PathBuf>,
+    covers: &'a HashMap<PathBuf, Option<PathBuf>>,
+    covers_pending: &'a HashSet<PathBuf>,
+    /// Album folders shown whose cover hasn't been looked for yet.
+    wanted_covers: Vec<(PathBuf, Vec<PathBuf>)>,
 }
 
 /// One folder in the Library tree, then its subfolders and songs, each with a tick box.
@@ -1649,7 +1737,25 @@ struct Tree<'a> {
 fn folder_row(ui: &mut egui::Ui, folder: &Folder, tree: &mut Tree, root: bool) {
     let header = |ui: &mut egui::Ui, tree: &mut Tree| {
         // The music folder itself has no tick box, so it can never be selected for the Trash.
-        let row = if root { ui.strong(&folder.name) } else { select_box(ui, &folder.path, tree.selected, &folder.name) };
+        // Tick box, then (for an album folder, one with songs in it) its cover, then the name.
+        let row = if root {
+            ui.strong(&folder.name)
+        } else if folder.files.is_empty() {
+            select_box(ui, &folder.path, tree.selected, &folder.name)
+        } else {
+            select_box(ui, &folder.path, tree.selected, "");
+            match tree.covers.get(&folder.path) {
+                Some(Some(file)) => {
+                    ui.add(
+                        egui::Image::new(format!("file://{}", file.display())).fit_to_exact_size(egui::vec2(24.0, 24.0)).corner_radius(2.0),
+                    );
+                }
+                Some(None) => {}
+                None if !tree.covers_pending.contains(&folder.path) => tree.wanted_covers.push((folder.path.clone(), folder.files.clone())),
+                None => {}
+            }
+            ui.add(egui::Label::new(&folder.name).sense(egui::Sense::click()))
+        };
         row.context_menu(|ui| {
             if ui.button("Open in file manager").clicked() {
                 tree.action = Some(LibraryAction::Reveal(folder.path.clone()));
@@ -1694,10 +1800,30 @@ impl eframe::App for App {
             self.spawn(&ctx, |_| Msg::Release(backend::latest_release()));
         }
         egui::Panel::bottom("footer").show(ui, |ui| self.footer(ui));
-        egui::Panel::bottom("downloads").resizable(true).default_size(180.0).min_size(80.0).show(ui, |ui| {
-            ui.add_space(6.0);
-            self.downloads_panel(ui);
-        });
+        // The Downloads list opens while something is downloading; otherwise it's one line.
+        let busy = self.running + self.queue.len() > 0 || self.paused.is_some();
+        if busy || self.downloads_open {
+            egui::Panel::bottom("downloads").resizable(true).default_size(180.0).min_size(80.0).show(ui, |ui| {
+                ui.add_space(6.0);
+                self.downloads_panel(ui);
+            });
+        } else {
+            egui::Panel::bottom("downloads-line").resizable(false).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("Downloads");
+                    let done = self.history.iter().filter(|s| matches!(self.jobs.get(&s.id), Some(Job::Done(_)))).count();
+                    let failed = self.history.iter().filter(|s| matches!(self.jobs.get(&s.id), Some(Job::Failed(_)))).count();
+                    match (done, failed) {
+                        (0, 0) => ui.weak("Nothing downloading"),
+                        (d, 0) => ui.weak(format!("{d} done")),
+                        (d, f) => ui.colored_label(ui.visuals().error_fg_color, format!("{d} done, {f} failed")),
+                    };
+                    if !self.history.is_empty() && ui.small_button("Show").clicked() {
+                        self.downloads_open = true;
+                    }
+                });
+            });
+        }
         egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Library, "Library");
@@ -1734,7 +1860,9 @@ impl eframe::App for App {
             match self.tab {
                 Tab::Search => self.search_tab(ui),
                 Tab::Library => self.library_tab(ui),
-                Tab::Settings => self.settings_tab(ui),
+                Tab::Settings => {
+                    egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| self.settings_tab(ui));
+                }
             }
         });
         self.confirm_dialog(&ctx);
