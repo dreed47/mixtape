@@ -35,6 +35,10 @@ when Omarchy is installed and works on any Linux desktop otherwise.
   Double-click a song to play it. Right-click a song to play it, open it in the
   Stems app when it is installed, or show it in your file manager. Right-click
   a folder, or click **Open in file manager**, to open it there.
+- **Duplicates.** The Library lists songs you have more than once (same
+  artist and title, same length), so you can trash the extra copies.
+- **Downloads resume.** Songs still waiting when you close Mixtape start
+  again the next time you open it.
 - **Settings.** Choose the music folder (local or a network share), the
   player (Amberol, VLC, mpv, or any command), the file format, and whether to
   use a YouTube Music Premium login.
@@ -125,6 +129,8 @@ download log stay where they are.
 | --- | --- |
 | `~/.config/mixtape/settings.json` | Music folder and player |
 | `~/.local/share/mixtape/downloads.tsv` | Log of songs Mixtape downloaded |
+| `~/.local/share/mixtape/queue.json` | Songs waiting to download |
+| `~/.cache/mixtape/songs.json` | Song details and tags, so scans are fast |
 | `~/.local/share/mixtape/source-dir` | The folder Mixtape was installed from, for **Update** |
 
 Mixtape respects `XDG_CONFIG_HOME` and `XDG_DATA_HOME`.

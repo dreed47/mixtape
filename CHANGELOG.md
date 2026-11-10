@@ -4,6 +4,25 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 `Cargo.toml`, shows in the window's footer, and each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- The download queue survives a restart: waiting and unfinished songs resume
+  the next time Mixtape opens. Waiting songs have **Cancel**, and
+  **Cancel waiting** drops them all.
+- The footer warns when a newer yt-dlp has been out for over a week and yours
+  is over a month old (YouTube changes often and old versions stop working),
+  with **Copy update command**. The command fits how yt-dlp is installed:
+  `omarchy update` or `sudo pacman -Syu` when your distribution already has
+  the new release, otherwise `uv tool install yt-dlp` (no sudo), and
+  `uv tool upgrade yt-dlp` for a copy installed that way.
+- After each scan Mixtape reads every song's tags in the background (cached
+  in `~/.cache/mixtape/songs.json`, so later scans are instant). The "In
+  library" check also matches by tags, and the Library shows song details
+  without waiting.
+- **Duplicates** view in the Library: songs that share an artist and title
+  (from tags or from the folder and file name) and are within 3 seconds of
+  each other's length, grouped so you can tick and trash the extras.
+
 ## 0.4.0
 
 - GitHub Actions checks formatting, lints, tests, the search helper and the

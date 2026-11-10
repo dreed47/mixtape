@@ -17,6 +17,10 @@ enum Msg {
     Progress(String, f32),
     Done(Song, Result<backend::Downloaded, String>),
     Scanned(Scan),
+    /// Details and tags for every song in the folder at `PathBuf`, and the duplicate groups among them.
+    Indexed(PathBuf, HashMap<PathBuf, backend::AudioInfo>, Vec<Vec<PathBuf>>),
+    /// Installed version, newest version, and the command that updates it.
+    Ytdlp(Option<(String, String, String)>),
     Picked(Option<PathBuf>),
     Release(Result<Option<backend::Version>, String>),
     Updated(Result<(), String>),
@@ -88,6 +92,13 @@ impl Drop for Preview {
     }
 }
 
+#[derive(PartialEq, Clone, Copy)]
+enum View {
+    Folders,
+    Recent,
+    Duplicates,
+}
+
 enum Job {
     Queued,
     Running(f32),
@@ -138,7 +149,12 @@ struct App {
     /// Album track lists being fetched; a few at a time so "Select all" on a big artist doesn't start dozens.
     album_loads: usize,
     library_filter: String,
-    recent: bool,
+    view: View,
+    /// Reading every song's tags in the background after a scan.
+    indexing: bool,
+    duplicates: Vec<Vec<PathBuf>>,
+    /// The installed and newest yt-dlp, when the installed one is out of date.
+    ytdlp_outdated: Option<(String, String, String)>,
     confirm: Option<Song>,
 
     jobs: HashMap<String, Job>,
@@ -200,7 +216,10 @@ impl App {
             page_title: None,
             album_loads: 0,
             library_filter: String::new(),
-            recent: false,
+            view: View::Folders,
+            indexing: false,
+            duplicates: vec![],
+            ytdlp_outdated: None,
             confirm: None,
             jobs: HashMap::new(),
             queue: VecDeque::new(),
@@ -224,6 +243,13 @@ impl App {
             rx,
         };
         app.rescan(ctx);
+        app.spawn(ctx, |_| Msg::Ytdlp(backend::ytdlp_outdated()));
+        let resumed = backend::load_queue();
+        if !resumed.is_empty() {
+            let n = resumed.len();
+            resumed.into_iter().for_each(|song| app.enqueue(song));
+            app.notify(if n == 1 { "Resuming 1 download from last time".into() } else { format!("Resuming {n} downloads from last time") });
+        }
         app
     }
 
@@ -304,6 +330,7 @@ impl App {
                     }
                 };
                 self.jobs.insert(song.id, job);
+                self.save_queue();
                 if self.queue.is_empty() && self.running == 0 {
                     let (ok, failed) = std::mem::take(&mut self.batch);
                     let songs = |n| if n == 1 { "1 song".to_string() } else { format!("{n} songs") };
@@ -317,9 +344,28 @@ impl App {
             Msg::Scanned(scan) => {
                 self.scanning = false;
                 self.selected.retain(|p| p.starts_with(&scan.root.path));
-                self.scan = Some(scan);
                 self.details.clear(); // files may have changed; read again when shown
+                self.indexing = true;
+                let (root, all) = (scan.root.path.clone(), scan.all.clone());
+                self.scan = Some(scan);
+                self.spawn(ctx, move |_| {
+                    let index = backend::index(&all);
+                    let groups = backend::duplicates(&root, &index);
+                    Msg::Indexed(root, index, groups)
+                });
             }
+            Msg::Indexed(root, index, groups) => {
+                // Ignore the result for a folder that's no longer the music folder.
+                if let Some(scan) = self.scan.as_mut().filter(|s| s.root.path == root) {
+                    for info in index.values() {
+                        scan.keys.extend(backend::tag_keys(info));
+                    }
+                    self.details.extend(index);
+                    self.duplicates = groups;
+                    self.indexing = false;
+                }
+            }
+            Msg::Ytdlp(outdated) => self.ytdlp_outdated = outdated,
             Msg::Probed(found) => {
                 for (path, info) in found {
                     self.probing.remove(&path);
@@ -369,12 +415,37 @@ impl App {
         self.history.retain(|s| s.id != song.id);
         self.history.push(song.clone());
         self.queue.push_back(song);
+        self.save_queue();
+    }
+
+    /// Writes the waiting and running songs to disk, so they resume after a restart.
+    fn save_queue(&mut self) {
+        let pending: Vec<Song> =
+            self.history.iter().filter(|s| matches!(self.jobs.get(&s.id), Some(Job::Queued | Job::Running(_)))).cloned().collect();
+        if let Err(e) = backend::save_queue(&pending) {
+            self.status = Some(format!("Could not save the download queue: {e}"));
+        }
+    }
+
+    /// Drops songs that haven't started downloading: one, or all of them.
+    fn cancel_waiting(&mut self, only: Option<&str>) {
+        let cancel: Vec<String> = self.queue.iter().filter(|s| only.is_none_or(|id| s.id == id)).map(|s| s.id.clone()).collect();
+        self.queue.retain(|s| !cancel.contains(&s.id));
+        self.history.retain(|s| !cancel.contains(&s.id));
+        for id in &cancel {
+            self.jobs.remove(id);
+        }
+        self.save_queue();
     }
 
     fn downloads_panel(&mut self, ui: &mut egui::Ui) {
-        let mut retry = None;
+        let (mut retry, mut cancel) = (None, None);
         ui.horizontal(|ui| {
             ui.heading("Downloads");
+            let waiting = self.queue.len();
+            if waiting > 0 && ui.button(format!("Cancel waiting ({waiting})")).on_hover_text("Songs already downloading finish").clicked() {
+                cancel = Some(None);
+            }
             let finished = |j: Option<&Job>| matches!(j, Some(Job::Done(_) | Job::Failed(_)));
             if ui.add_enabled(self.history.iter().any(|s| finished(self.jobs.get(&s.id))), egui::Button::new("Clear finished")).clicked() {
                 let jobs = &self.jobs;
@@ -391,10 +462,10 @@ impl App {
                     ui.strong(&song.title);
                     ui.label(&song.artists);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(Job::Failed(_)) = self.jobs.get(&song.id)
-                            && ui.small_button("Retry").clicked()
-                        {
-                            retry = Some(song.clone());
+                        match self.jobs.get(&song.id) {
+                            Some(Job::Failed(_)) if ui.small_button("Retry").clicked() => retry = Some(song.clone()),
+                            Some(Job::Queued) if ui.small_button("Cancel").clicked() => cancel = Some(Some(song.id.clone())),
+                            _ => {}
                         }
                         job_status(ui, self.jobs.get(&song.id), false);
                     });
@@ -404,6 +475,9 @@ impl App {
         if let Some(song) = retry {
             self.jobs.remove(&song.id);
             self.enqueue(song);
+        }
+        if let Some(only) = cancel {
+            self.cancel_waiting(only.as_deref());
         }
     }
 
@@ -642,8 +716,11 @@ impl App {
                 self.library_filter.clear();
             }
             ui.separator();
-            ui.selectable_value(&mut self.recent, false, "Folders");
-            ui.selectable_value(&mut self.recent, true, "Recently added");
+            ui.selectable_value(&mut self.view, View::Folders, "Folders");
+            ui.selectable_value(&mut self.view, View::Recent, "Recently added");
+            let dups = if self.indexing { "Duplicates…".to_string() } else { format!("Duplicates ({})", self.duplicates.len()) };
+            ui.selectable_value(&mut self.view, View::Duplicates, dups)
+                .on_hover_text("The same song in more than one place: same artist and title, and lengths within 3 seconds");
         });
         let Some(scan) = &self.scan else { return };
         let mut tree = Tree {
@@ -657,12 +734,42 @@ impl App {
         let filter = self.library_filter.trim();
         let flat: Option<Vec<&PathBuf>> = if !filter.is_empty() {
             Some(scan.matching(filter))
-        } else if self.recent {
+        } else if self.view == View::Recent {
             Some(scan.all.iter().map(|(p, _)| p).take(200).collect())
         } else {
             None
         };
+        let label = |file: &PathBuf| {
+            // "Queen / Greatest Hits / Bohemian Rhapsody"
+            let shown = file.strip_prefix(&scan.root.path).unwrap_or(file).with_extension("");
+            shown.iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>().join(" / ")
+        };
+        let (duplicates, indexing) = (&self.duplicates, self.indexing);
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match &flat {
+            None if self.view == View::Duplicates => {
+                if indexing {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Reading song tags… The first time takes a while on a big library.");
+                    });
+                } else if duplicates.is_empty() {
+                    ui.weak("No duplicates found.");
+                } else {
+                    ui.weak("Each group looks like the same song. Tick the copies you don't want, then use Move to Trash.");
+                    for group in duplicates {
+                        ui.add_space(6.0);
+                        let name = group[0].file_stem().unwrap_or_default().to_string_lossy();
+                        ui.strong(format!(
+                            "{} — {} copies",
+                            name.trim_start_matches(|c: char| c.is_ascii_digit() || " -.".contains(c)),
+                            group.len()
+                        ));
+                        for file in group {
+                            file_row(ui, file, &label(file), &mut tree);
+                        }
+                    }
+                }
+            }
             None => folder_row(ui, &scan.root, &mut tree, true),
             Some(files) if files.is_empty() => {
                 ui.weak("No songs match.");
@@ -670,10 +777,7 @@ impl App {
             Some(files) => {
                 const MAX: usize = 500;
                 for file in files.iter().take(MAX) {
-                    // "Queen / Greatest Hits / Bohemian Rhapsody"
-                    let shown = file.strip_prefix(&scan.root.path).unwrap_or(file).with_extension("");
-                    let label = shown.iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>().join(" / ");
-                    file_row(ui, file, &label, &mut tree);
+                    file_row(ui, file, &label(file), &mut tree);
                 }
                 if files.len() > MAX {
                     ui.weak(format!("…and {} more. Type more of the name to narrow it down.", files.len() - MAX));
@@ -773,6 +877,23 @@ impl App {
     fn footer(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.weak(concat!("Mixtape ", env!("CARGO_PKG_VERSION")));
+            // YouTube changes often, and an out-of-date yt-dlp starts failing.
+            if let Some((installed, latest, command)) = &self.ytdlp_outdated {
+                let command = command.clone();
+                ui.colored_label(ui.visuals().warn_fg_color, format!("· yt-dlp {installed} is out of date ({latest} is out)"))
+                    .on_hover_text(if command.starts_with("uv tool install") {
+                        format!(
+                            "YouTube changes often, and older yt-dlp versions stop working. Your system's package \
+                             doesn't have {latest} yet, so install the newest yt-dlp just for you (no sudo):\n\n{command}"
+                        )
+                    } else {
+                        format!("YouTube changes often, and older yt-dlp versions stop working. Update it with:\n\n{command}")
+                    });
+                if ui.small_button("Copy update command").clicked() {
+                    ui.ctx().copy_text(command);
+                    self.notify("Copied".into());
+                }
+            }
             match &self.update {
                 Update::None => {}
                 Update::Available(v) => {
