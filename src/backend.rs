@@ -772,6 +772,27 @@ pub fn trash(paths: &[PathBuf]) -> Result<(), String> {
     run(Command::new("gio").arg("trash").arg("--").args(paths)).map(|_| ())
 }
 
+/// The Trash failed because this drive has none (some network shares and removable drives).
+pub fn no_trash(raw: &str) -> bool {
+    let raw = raw.to_lowercase();
+    ["trash directory", "trashing on system internal mounts", "not supported"].iter().any(|n| raw.contains(n))
+}
+
+/// Deletes for good: only for drives without a Trash, after the user has said yes. Refuses anything
+/// outside the music folder, and the music folder itself.
+pub fn delete_permanently(music_dir: &Path, paths: &[PathBuf]) -> Result<(), String> {
+    for p in paths {
+        if !p.starts_with(music_dir) || p == music_dir {
+            return Err(format!("{} isn't inside the music folder", p.display()));
+        }
+    }
+    for p in paths {
+        let gone = if p.is_dir() { std::fs::remove_dir_all(p) } else { std::fs::remove_file(p) };
+        gone.map_err(|e| format!("{}: {e}", p.display()))?;
+    }
+    forget(paths)
+}
+
 /// Drops log lines for songs under `paths`, so trashed songs no longer count as downloaded.
 pub fn forget(paths: &[PathBuf]) -> Result<(), String> {
     let file = log_file();
@@ -1619,6 +1640,24 @@ mod tests {
         assert_eq!(challenge_solver_hint_for(uv_copy, home, omarchy), "uv tool install --force 'yt-dlp[default]'");
         assert_eq!(challenge_solver_hint_for(Path::new("/usr/bin/yt-dlp"), home, omarchy), "omarchy-pkg-add yt-dlp-ejs");
         assert_eq!(challenge_solver_hint_for(Path::new("/usr/bin/yt-dlp"), home, "ID=arch\n"), "sudo pacman -S yt-dlp-ejs");
+    }
+
+    #[test]
+    fn permanent_delete_stays_inside_the_music_folder() {
+        let dir = std::env::temp_dir().join(format!("mixtape-delete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Music/Band/Album")).unwrap();
+        std::fs::write(dir.join("Music/Band/Album/Song.mp3"), "").unwrap();
+        std::fs::write(dir.join("outside.mp3"), "").unwrap();
+        let music = dir.join("Music");
+        assert!(delete_permanently(&music, &[dir.join("outside.mp3")]).is_err());
+        assert!(delete_permanently(&music, std::slice::from_ref(&music)).is_err());
+        assert!(dir.join("outside.mp3").exists() && music.exists());
+        delete_permanently(&music, &[music.join("Band/Album")]).unwrap();
+        assert!(!music.join("Band/Album").exists() && music.join("Band").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(no_trash("Error trashing file: Unable to find or create trash directory"));
+        assert!(!no_trash("Permission denied"));
     }
 
     #[test]

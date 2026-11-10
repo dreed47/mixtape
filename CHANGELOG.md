@@ -6,6 +6,9 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 
 ## Unreleased
 
+- On a drive with no Trash, **Move to Trash** (and the old copies **Fix tags**
+  replaces) asks "Delete permanently?" instead of failing. Deleting never
+  happens without that answer, and only inside the music folder.
 - Settings page redesign: a title, sections (Library, Downloads, App,
   Dependencies), labels lined up with the first line of each setting, short
   choice labels with a dimmed line of help under each, help text that wraps

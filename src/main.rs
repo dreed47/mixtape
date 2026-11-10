@@ -25,6 +25,7 @@ enum Msg {
     Release(Result<Option<backend::Version>, String>),
     Updated(Result<(), String>),
     Trashed(Vec<PathBuf>, Result<(), String>),
+    Deleted(Vec<PathBuf>, Result<(), String>),
     /// An old file and the YouTube Music song it came from, for Fix tags.
     Resolved(PathBuf, Result<Song, String>),
     /// Fix tags finished looking up songs; how many it couldn't.
@@ -230,6 +231,10 @@ struct App {
     trash_confirm: Option<Vec<PathBuf>>,
     /// Songs waiting on "Fix tags?".
     fix_confirm: Option<Vec<PathBuf>>,
+    /// Items the Trash couldn't take (the drive has none), waiting on "Delete permanently?".
+    delete_confirm: Option<Vec<PathBuf>>,
+    /// Old copies Fix tags couldn't trash for the same reason, asked about when the queue finishes.
+    untrashable: Vec<PathBuf>,
     /// Song id -> the old file it replaces; trashed once the new download is in.
     replaces: HashMap<String, PathBuf>,
     update: Update,
@@ -334,6 +339,8 @@ impl App {
             batch: (0, 0),
             trash_confirm: None,
             fix_confirm: None,
+            delete_confirm: None,
+            untrashable: vec![],
             replaces: HashMap::new(),
             update: Update::None,
             downloads: Downloads(Running::default()),
@@ -449,7 +456,11 @@ impl App {
                             && let Err(e) =
                                 backend::trash(std::slice::from_ref(&old)).and_then(|_| backend::forget(std::slice::from_ref(&old)))
                         {
-                            self.status = Some(format!("Could not move the old copy to the Trash: {e}"));
+                            if backend::no_trash(&e) {
+                                self.untrashable.push(old);
+                            } else {
+                                self.status = Some(format!("Could not move the old copy to the Trash: {e}"));
+                            }
                         }
                         self.logged.insert(song.id.clone());
                         self.batch.0 += 1;
@@ -463,6 +474,9 @@ impl App {
                 self.jobs.insert(song.id, job);
                 self.save_queue();
                 if self.queue.is_empty() && self.running == 0 {
+                    if !self.untrashable.is_empty() {
+                        self.delete_confirm = Some(std::mem::take(&mut self.untrashable));
+                    }
                     let (ok, failed) = std::mem::take(&mut self.batch);
                     let songs = |n| if n == 1 { "1 song".to_string() } else { format!("{n} songs") };
                     let summary = match failed {
@@ -528,10 +542,22 @@ impl App {
                         let n = paths.len();
                         self.notify(if n == 1 { "Moved 1 item to the Trash".into() } else { format!("Moved {n} items to the Trash") });
                     }
+                    Err(e) if backend::no_trash(&e) => self.delete_confirm = Some(paths.clone()),
                     Err(e) => self.status = Some(format!("Could not move to the Trash: {e}")),
                 }
                 self.logged = backend::read_log();
                 self.selected.clear();
+                self.rescan(ctx);
+            }
+            Msg::Deleted(paths, result) => {
+                match result {
+                    Ok(()) => {
+                        let n = paths.len();
+                        self.notify(if n == 1 { "Deleted 1 item".into() } else { format!("Deleted {n} items") });
+                    }
+                    Err(e) => self.status = Some(format!("Could not delete: {e}")),
+                }
+                self.logged = backend::read_log();
                 self.rescan(ctx);
             }
             Msg::Release(Ok(Some(latest))) if latest > backend::current_version() => {
@@ -1097,7 +1123,12 @@ impl App {
             if i.consume_key(Modifiers::NONE, Key::F1) {
                 self.show_keys = true;
             }
-            if typing || self.confirm.is_some() || self.trash_confirm.is_some() || self.fix_confirm.is_some() {
+            if typing
+                || self.confirm.is_some()
+                || self.trash_confirm.is_some()
+                || self.fix_confirm.is_some()
+                || self.delete_confirm.is_some()
+            {
                 return;
             }
             if i.consume_key(Modifiers::NONE, Key::Questionmark) || i.consume_key(Modifiers::SHIFT, Key::Slash) {
@@ -1382,6 +1413,49 @@ impl App {
                         let _ = tx.send(Msg::Resolved(old, song));
                     }
                     Msg::ResolveDone(missed)
+                });
+            }
+        }
+    }
+
+    /// Asked only when the Trash failed because the drive has none.
+    fn delete_dialog(&mut self, ctx: &egui::Context) {
+        let Some(paths) = &self.delete_confirm else { return };
+        let mut answer = None;
+        egui::Modal::new(egui::Id::new("delete")).show(ctx, |ui| {
+            let n = paths.len();
+            ui.heading("This drive has no Trash");
+            ui.label(if n == 1 {
+                "The item can't be moved to the Trash. Delete it permanently instead?".to_string()
+            } else {
+                format!("These {n} items can't be moved to the Trash. Delete them permanently instead?")
+            });
+            for p in paths.iter().take(8) {
+                ui.label(format!("•  {}", p.file_name().unwrap_or_default().to_string_lossy()));
+            }
+            if n > 8 {
+                ui.label(format!("…and {} more", n - 8));
+            }
+            ui.add_space(4.0);
+            ui.colored_label(ui.visuals().error_fg_color, "Deleted files can't be restored.");
+            ui.horizontal(|ui| {
+                let red = egui::Button::new(egui::RichText::new("Delete permanently").color(egui::Color32::WHITE))
+                    .fill(ui.visuals().error_fg_color);
+                if ui.add(red).clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("Keep them").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    answer = Some(false);
+                }
+            });
+        });
+        if let Some(yes) = answer {
+            let paths = self.delete_confirm.take().unwrap();
+            if yes {
+                let dir = self.settings.music_dir.clone();
+                self.spawn(ctx, move |_| {
+                    let r = backend::delete_permanently(&dir, &paths);
+                    Msg::Deleted(paths, r)
                 });
             }
         }
@@ -1966,6 +2040,7 @@ impl eframe::App for App {
         self.confirm_dialog(&ctx);
         self.trash_dialog(&ctx);
         self.fix_dialog(&ctx);
+        self.delete_dialog(&ctx);
         self.keys_dialog(&ctx);
     }
 }
