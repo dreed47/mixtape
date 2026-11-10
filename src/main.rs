@@ -3,7 +3,7 @@
 mod backend;
 mod theme;
 
-use backend::{Album, Folder, Scan, SearchResult, Settings, Song};
+use backend::{Album, Folder, Format, Scan, SearchResult, Settings, Song};
 use eframe::egui;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -15,15 +15,25 @@ enum Msg {
     Search(u64, Result<SearchResult, String>),
     Album(String, Result<Vec<Song>, String>),
     Progress(String, f32),
-    Done(Song, Result<PathBuf, String>),
+    Done(Song, Result<backend::Downloaded, String>),
     Scanned(Scan),
     Picked(Option<PathBuf>),
+    Trashed(Vec<PathBuf>, Result<(), String>),
+}
+
+/// What a click in the Library tree asks for.
+enum LibraryAction {
+    Play(PathBuf),
+    Stems(PathBuf),
+    /// Open a folder in the file manager.
+    Reveal(PathBuf),
 }
 
 enum Job {
     Queued,
     Running(f32),
-    Done,
+    /// The source quality, e.g. "256k AAC".
+    Done(String),
     Failed(String),
 }
 
@@ -76,6 +86,8 @@ struct App {
     scanning: bool,
     selected: HashSet<PathBuf>,
     stems: bool,
+    /// Selected songs and folders waiting on "Move to Trash?".
+    trash_confirm: Option<Vec<PathBuf>>,
 
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
@@ -112,6 +124,7 @@ impl App {
             scanning: false,
             selected: HashSet::new(),
             stems: backend::stems_installed(),
+            trash_confirm: None,
             tx,
             rx,
         };
@@ -179,12 +192,12 @@ impl App {
             Msg::Done(song, result) => {
                 self.running -= 1;
                 let job = match result {
-                    Ok(path) => {
+                    Ok(backend::Downloaded { path, source }) => {
                         if let Err(e) = backend::append_log(&song.id, &path) {
                             self.status = Some(format!("Could not write the download log: {e}"));
                         }
                         self.logged.insert(song.id.clone());
-                        Job::Done
+                        Job::Done(source)
                     }
                     Err(e) => Job::Failed(e),
                 };
@@ -197,6 +210,15 @@ impl App {
                 self.scanning = false;
                 self.selected.retain(|p| p.starts_with(&scan.root.path));
                 self.scan = Some(scan);
+            }
+            Msg::Trashed(paths, result) => {
+                match result.and_then(|_| backend::forget(&paths)) {
+                    Ok(()) => self.status = None,
+                    Err(e) => self.status = Some(format!("Could not move to the Trash: {e}")),
+                }
+                self.logged = backend::read_log();
+                self.selected.clear();
+                self.rescan(ctx);
             }
             Msg::Picked(dir) => self.draft.music_dir = dir.unwrap_or(self.draft.music_dir.clone()),
         }
@@ -216,7 +238,7 @@ impl App {
         let mut retry = None;
         ui.horizontal(|ui| {
             ui.heading("Downloads");
-            let finished = |j: Option<&Job>| matches!(j, Some(Job::Done | Job::Failed(_)));
+            let finished = |j: Option<&Job>| matches!(j, Some(Job::Done(_) | Job::Failed(_)));
             if ui.add_enabled(self.history.iter().any(|s| finished(self.jobs.get(&s.id))), egui::Button::new("Clear finished")).clicked() {
                 let jobs = &self.jobs;
                 self.history.retain(|s| !finished(jobs.get(&s.id)));
@@ -253,10 +275,10 @@ impl App {
             let Some(song) = self.queue.pop_front() else { break };
             self.running += 1;
             self.jobs.insert(song.id.clone(), Job::Running(0.0));
-            let dir = self.settings.music_dir.clone();
+            let settings = self.settings.clone();
             self.spawn(ctx, move |tx| {
                 let id = song.id.clone();
-                let result = backend::download(&dir, &song, |f| {
+                let result = backend::download(&settings, &song, |f| {
                     let _ = tx.send(Msg::Progress(id.clone(), f));
                 });
                 Msg::Done(song, result)
@@ -402,15 +424,29 @@ impl App {
         let dir = self.settings.music_dir.clone();
         ui.horizontal(|ui| {
             let n = self.selected.len();
+            let mut picked: Vec<PathBuf> = self.selected.iter().cloned().collect();
+            picked.sort();
             if ui.add_enabled(n > 0, egui::Button::new(format!("Play selected ({n})"))).clicked() {
-                let mut folders: Vec<PathBuf> = self.selected.iter().cloned().collect();
-                folders.sort();
-                if let Err(e) = backend::open_with(&self.settings.player, &folders) {
+                if let Err(e) = backend::open_with(&self.settings.player, &picked) {
                     self.status = Some(e);
                 }
             }
+            // Never the music folder itself, and nothing inside a folder that's also going.
+            let trash: Vec<PathBuf> = picked
+                .iter()
+                .filter(|p| **p != dir && !picked.iter().any(|q| q != *p && p.starts_with(q)))
+                .cloned()
+                .collect();
+            if ui.add_enabled(!trash.is_empty(), egui::Button::new(format!("Move to Trash ({})", trash.len()))).clicked() {
+                self.trash_confirm = Some(trash);
+            }
             if ui.add_enabled(n > 0, egui::Button::new("Clear selection")).clicked() {
                 self.selected.clear();
+            }
+            if ui.button("Open in file manager").on_hover_text("Open the music folder").clicked() {
+                if let Err(e) = backend::open_with("xdg-open", &[dir.clone()]) {
+                    self.status = Some(e);
+                }
             }
             if ui.button("Refresh").clicked() {
                 self.rescan(ui.ctx());
@@ -428,13 +464,51 @@ impl App {
             return;
         }
         let Some(scan) = &self.scan else { return };
-        let mut open = None;
+        let mut action = None;
         let (selected, stems) = (&mut self.selected, self.stems);
-        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| folder_row(ui, &scan.root, selected, stems, &mut open, true));
-        if let Some((with_stems, song)) = open {
-            let command = if with_stems { backend::STEMS } else { self.settings.player.as_str() };
-            if let Err(e) = backend::open_with(command, &[song]) {
-                self.status = Some(e);
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| folder_row(ui, &scan.root, selected, stems, &mut action, true));
+        let result = match action {
+            Some(LibraryAction::Play(song)) => backend::open_with(&self.settings.player, &[song]),
+            Some(LibraryAction::Stems(song)) => backend::open_with(backend::STEMS, &[song]),
+            Some(LibraryAction::Reveal(folder)) => backend::open_with("xdg-open", &[folder]),
+            None => Ok(()),
+        };
+        if let Err(e) = result {
+            self.status = Some(e);
+        }
+    }
+
+    fn trash_dialog(&mut self, ctx: &egui::Context) {
+        let Some(paths) = &self.trash_confirm else { return };
+        let mut answer = None;
+        egui::Modal::new(egui::Id::new("trash")).show(ctx, |ui| {
+            let n = paths.len();
+            ui.heading(if n == 1 { "Move 1 item to the Trash?".to_string() } else { format!("Move {n} items to the Trash?") });
+            for p in paths.iter().take(8) {
+                let kind = if p.is_dir() { "Folder" } else { "Song" };
+                ui.label(format!("{kind}: {}", p.file_name().unwrap_or_default().to_string_lossy()));
+            }
+            if n > 8 {
+                ui.label(format!("…and {} more", n - 8));
+            }
+            ui.add_space(4.0);
+            ui.weak("You can restore them from the Trash in your file manager.");
+            ui.horizontal(|ui| {
+                if ui.button("Move to Trash").clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    answer = Some(false);
+                }
+            });
+        });
+        if let Some(yes) = answer {
+            let paths = self.trash_confirm.take().unwrap();
+            if yes {
+                self.spawn(ctx, move |_| {
+                    let r = backend::trash(&paths);
+                    Msg::Trashed(paths, r)
+                });
             }
         }
     }
@@ -470,6 +544,34 @@ impl App {
                     ui.add(egui::TextEdit::singleline(&mut self.draft.player).hint_text("e.g. strawberry").desired_width(360.0));
                     ui.small("Mixtape adds the selected folders after the command.");
                 }
+            });
+            ui.end_row();
+
+            ui.label("Format");
+            ui.vertical(|ui| {
+                ui.radio_value(&mut self.draft.format, Format::Mp3, "MP3: plays everywhere");
+                ui.radio_value(&mut self.draft.format, Format::Original, "Original: best quality, no conversion (Opus, or AAC with Premium)");
+                ui.small("Original files are about half the size. Some car stereos and older devices can't play Opus.");
+            });
+            ui.end_row();
+
+            ui.label("Premium");
+            ui.vertical(|ui| {
+                let browsers = backend::detected_browsers();
+                let mut premium = !self.draft.cookies_browser.is_empty();
+                if ui.add_enabled(!browsers.is_empty(), egui::Checkbox::new(&mut premium, "Use my YouTube Music Premium login")).changed() {
+                    self.draft.cookies_browser = if premium { browsers[0].1.to_string() } else { String::new() };
+                }
+                if premium {
+                    let current = browsers.iter().find(|b| b.1 == self.draft.cookies_browser).map_or("Choose a browser", |b| b.0);
+                    egui::ComboBox::from_id_salt("browser").selected_text(current).show_ui(ui, |ui| {
+                        for (name, id) in &browsers {
+                            ui.selectable_value(&mut self.draft.cookies_browser, id.to_string(), *name);
+                        }
+                    });
+                }
+                ui.small("Premium gets 256 kbps AAC instead of 130 kbps. Sign in to music.youtube.com in that browser first. \
+                          Mixtape only passes the browser's name to yt-dlp, which reads the login on this computer.");
             });
             ui.end_row();
         });
@@ -527,8 +629,10 @@ fn job_status(ui: &mut egui::Ui, job: Option<&Job>, have: bool) {
         Some(Job::Failed(e)) => {
             ui.colored_label(ui.visuals().error_fg_color, "Failed").on_hover_text(e);
         }
-        Some(Job::Done) => {
-            ui.colored_label(ui.visuals().hyperlink_color, "✔ Downloaded");
+        Some(Job::Done(source)) => {
+            let label = if source.is_empty() { "✔ Downloaded".to_string() } else { format!("✔ Downloaded · {source}") };
+            ui.colored_label(ui.visuals().hyperlink_color, label)
+                .on_hover_text("The quality YouTube sent. Premium gets 256k AAC; free accounts get about 130k Opus.");
         }
         None if have => {
             ui.colored_label(ui.visuals().hyperlink_color, "✔ In library");
@@ -545,55 +649,74 @@ fn accent_button(ui: &egui::Ui, label: String) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(label).strong().color(text)).fill(accent)
 }
 
-/// One folder in the Library tree: a checkbox to select it, then its subfolders and songs.
-/// A song is played by double-click or from its right-click menu; `open` gets (in Stems?, song).
+/// A tick box that adds `path` to or removes it from the selection.
+fn select_box(ui: &mut egui::Ui, path: &PathBuf, selected: &mut HashSet<PathBuf>, label: impl Into<egui::WidgetText>) -> egui::Response {
+    let mut checked = selected.contains(path);
+    let response = ui.checkbox(&mut checked, label);
+    if response.changed() {
+        if checked {
+            selected.insert(path.clone());
+        } else {
+            selected.remove(path);
+        }
+    }
+    response
+}
+
+/// One folder in the Library tree, then its subfolders and songs, each with a tick box.
+/// Double-click plays a song; right-click opens a menu.
 fn folder_row(
     ui: &mut egui::Ui,
     folder: &Folder,
     selected: &mut HashSet<PathBuf>,
     stems: bool,
-    open: &mut Option<(bool, PathBuf)>,
+    action: &mut Option<LibraryAction>,
     default_open: bool,
 ) {
-    let mut checked = selected.contains(&folder.path);
-    let check = |ui: &mut egui::Ui, checked: &mut bool, selected: &mut HashSet<PathBuf>| {
-        if ui.checkbox(checked, &folder.name).changed() {
-            if *checked {
-                selected.insert(folder.path.clone());
-            } else {
-                selected.remove(&folder.path);
+    let header = |ui: &mut egui::Ui, selected: &mut HashSet<PathBuf>, action: &mut Option<LibraryAction>| {
+        select_box(ui, &folder.path, selected, &folder.name).context_menu(|ui| {
+            if ui.button("Open in file manager").clicked() {
+                *action = Some(LibraryAction::Reveal(folder.path.clone()));
+                ui.close();
             }
-        }
+        });
     };
     if folder.children.is_empty() && folder.files.is_empty() {
         ui.horizontal(|ui| {
             ui.add_space(ui.spacing().indent);
-            check(ui, &mut checked, selected);
+            header(ui, selected, action);
         });
         return;
     }
     let id = ui.make_persistent_id(&folder.path);
     egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, default_open)
-        .show_header(ui, |ui| check(ui, &mut checked, selected))
+        .show_header(ui, |ui| header(ui, selected, action))
         .body(|ui| {
             for child in &folder.children {
-                folder_row(ui, child, selected, stems, open, false);
+                folder_row(ui, child, selected, stems, action, false);
             }
             for file in &folder.files {
                 let name = file.file_stem().unwrap_or_default().to_string_lossy();
-                let row = ui.add(egui::Label::new(format!("♪  {name}")).sense(egui::Sense::click()));
-                if row.double_clicked() {
-                    *open = Some((false, file.clone()));
-                }
-                row.on_hover_text("Double-click to play, right-click for more").context_menu(|ui| {
-                    if ui.button("Play").clicked() {
-                        *open = Some((false, file.clone()));
-                        ui.close();
+                ui.horizontal(|ui| {
+                    select_box(ui, file, selected, "");
+                    let row = ui.add(egui::Label::new(format!("♪  {name}")).sense(egui::Sense::click()));
+                    if row.double_clicked() {
+                        *action = Some(LibraryAction::Play(file.clone()));
                     }
-                    if stems && ui.button("Open in Stems").clicked() {
-                        *open = Some((true, file.clone()));
-                        ui.close();
-                    }
+                    row.on_hover_text("Double-click to play, right-click for more").context_menu(|ui| {
+                        if ui.button("Play").clicked() {
+                            *action = Some(LibraryAction::Play(file.clone()));
+                            ui.close();
+                        }
+                        if stems && ui.button("Open in Stems").clicked() {
+                            *action = Some(LibraryAction::Stems(file.clone()));
+                            ui.close();
+                        }
+                        if ui.button("Show in file manager").clicked() {
+                            *action = Some(LibraryAction::Reveal(folder.path.clone()));
+                            ui.close();
+                        }
+                    });
                 });
             }
         });
@@ -607,6 +730,9 @@ impl eframe::App for App {
             self.handle(&ctx, msg);
         }
         self.start_downloads(&ctx);
+        egui::Panel::bottom("footer").show(ui, |ui| {
+            ui.weak(concat!("Mixtape ", env!("CARGO_PKG_VERSION")));
+        });
         egui::Panel::bottom("downloads").resizable(true).default_size(180.0).min_size(80.0).show(ui, |ui| {
             ui.add_space(6.0);
             self.downloads_panel(ui);
@@ -633,6 +759,7 @@ impl eframe::App for App {
             }
         });
         self.confirm_dialog(&ctx);
+        self.trash_dialog(&ctx);
     }
 }
 

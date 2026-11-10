@@ -64,12 +64,39 @@ fn log_file() -> PathBuf {
 pub struct Settings {
     pub music_dir: PathBuf,
     pub player: String,
+    pub format: Format,
+    /// yt-dlp name of the browser whose YouTube login to use (for Premium audio); empty = none.
+    pub cookies_browser: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Format {
+    /// Converted to MP3 (VBR V0): plays everywhere.
+    #[default]
+    Mp3,
+    /// The audio exactly as YouTube sends it (Opus, or AAC with Premium): best quality, no conversion.
+    Original,
+}
+
+/// Browsers yt-dlp can read a YouTube login from: (label, yt-dlp name, binary).
+pub const BROWSERS: [(&str, &str, &str); 6] = [
+    ("Chromium", "chromium", "chromium"),
+    ("Firefox", "firefox", "firefox"),
+    ("Chrome", "chrome", "google-chrome-stable"),
+    ("Brave", "brave", "brave"),
+    ("Vivaldi", "vivaldi", "vivaldi-stable"),
+    ("Edge", "edge", "microsoft-edge-stable"),
+];
+
+pub fn detected_browsers() -> Vec<(&'static str, &'static str)> {
+    BROWSERS.into_iter().filter(|b| on_path(b.2)).map(|b| (b.0, b.1)).collect()
 }
 
 impl Default for Settings {
     fn default() -> Self {
         let player = detected_players().first().map_or("xdg-open", |p| p.1).to_string();
-        Self { music_dir: home().join("Music"), player }
+        Self { music_dir: home().join("Music"), player, format: Format::Mp3, cookies_browser: String::new() }
     }
 }
 
@@ -154,24 +181,38 @@ fn parts(s: &Song) -> [String; 3] {
     [safe_name(&s.artist, "Unknown Artist"), safe_name(&s.album, "Singles"), safe_name(&s.title, s.id.as_str())]
 }
 
-pub fn song_path(dir: &Path, s: &Song) -> PathBuf {
-    let [artist, album, title] = parts(s);
-    dir.join(artist).join(album).join(title + ".mp3")
+pub struct Downloaded {
+    pub path: PathBuf,
+    /// What YouTube sent, before any conversion, e.g. "130k Opus" or "256k AAC".
+    pub source: String,
 }
 
-/// Downloads one song to <dir>/Artist/Album/Title.mp3, reporting progress 0..1.
-pub fn download(dir: &Path, s: &Song, progress: impl Fn(f32)) -> Result<PathBuf, String> {
+/// Downloads one song to <music_dir>/Artist/Album/Title.<ext>, reporting progress 0..1.
+pub fn download(settings: &Settings, s: &Song, progress: impl Fn(f32)) -> Result<Downloaded, String> {
     if !safe_id(&s.id, 11) {
         return Err(format!("bad video id {:?}", s.id));
     }
     let [artist, album, title] = parts(s).map(|p| p.replace('%', "%%")); // yt-dlp template escaping
-    let mut child = Command::new("yt-dlp")
-        .args(["-x", "--audio-format", "mp3", "--audio-quality", "0", "--no-playlist"])
-        .args(["--embed-metadata", "--embed-thumbnail", "--convert-thumbnails", "jpg"])
+    let mut cmd = Command::new("yt-dlp");
+    cmd.args(["-x", "--no-playlist", "--embed-metadata", "--convert-thumbnails", "jpg"]);
+    match settings.format {
+        Format::Mp3 => cmd.args(["--audio-format", "mp3", "--audio-quality", "0", "--embed-thumbnail"]),
+        // Embedding art in Opus needs Python's mutagen, which many installs lack; a cover.jpg beside the songs works in every player.
+        Format::Original => cmd.args(["--write-thumbnail", "-o"]).arg(format!("thumbnail:{artist}/{album}/cover.%(ext)s")),
+    };
+    if !settings.cookies_browser.is_empty() {
+        if !BROWSERS.iter().any(|b| b.1 == settings.cookies_browser) {
+            return Err(format!("unknown browser {:?} in Settings", settings.cookies_browser));
+        }
+        cmd.args(["--cookies-from-browser", &settings.cookies_browser]);
+    }
+    let mut child = cmd
         .args(["--quiet", "--progress", "--newline", "--progress-template"])
         .arg("download:MIXTAPE %(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s")
+        .args(["--print", "video:MIXTAPE_SOURCE %(acodec)s %(abr)s"])
+        .args(["--print", "after_move:MIXTAPE_FILE %(filepath)s"])
         .arg("-P")
-        .arg(dir)
+        .arg(&settings.music_dir)
         .arg("-o")
         .arg(format!("{artist}/{album}/{title}.%(ext)s"))
         .arg(format!("https://music.youtube.com/watch?v={}", s.id))
@@ -185,14 +226,37 @@ pub fn download(dir: &Path, s: &Song, progress: impl Fn(f32)) -> Result<PathBuf,
         let _ = stderr.read_to_end(&mut buf);
         buf
     });
+    let (mut saved, mut source) = (None, String::new());
     for line in BufReader::new(child.stdout.take().unwrap()).lines().map_while(Result::ok) {
         if let Some(f) = parse_progress(&line) {
             progress(f);
+        } else if let Some(s) = line.strip_prefix("MIXTAPE_SOURCE ") {
+            source = describe_source(s);
+        } else if let Some(path) = line.strip_prefix("MIXTAPE_FILE ") {
+            saved = Some(PathBuf::from(path));
         }
     }
     let status = child.wait().map_err(|e| e.to_string())?;
     let stderr = errors.join().unwrap_or_default();
-    if status.success() { Ok(song_path(dir, s)) } else { Err(last_line(&stderr)) }
+    match (status.success(), saved) {
+        (true, Some(path)) => Ok(Downloaded { path, source }),
+        (true, None) => Err("yt-dlp finished without saving a file".into()),
+        (false, _) => Err(last_line(&stderr)),
+    }
+}
+
+/// "opus 129.055" -> "129k Opus"; "mp4a.40.2 256.0" -> "256k AAC".
+fn describe_source(s: &str) -> String {
+    let (codec, abr) = s.split_once(' ').unwrap_or((s, ""));
+    let name = match codec {
+        "opus" => "Opus".to_string(),
+        c if c.starts_with("mp4a") => "AAC".to_string(),
+        c => c.to_uppercase(),
+    };
+    match abr.parse::<f64>() {
+        Ok(k) => format!("{}k {name}", k.round()),
+        Err(_) => name,
+    }
 }
 
 fn parse_progress(line: &str) -> Option<f32> {
@@ -200,6 +264,23 @@ fn parse_progress(line: &str) -> Option<f32> {
     let done: f64 = it.next()?.parse().ok()?;
     let total: f64 = it.next()?.parse().ok()?;
     (total > 0.0).then(|| (done / total).clamp(0.0, 1.0) as f32)
+}
+
+/// Moves files and folders to the desktop Trash with `gio trash`, so they can be restored.
+pub fn trash(paths: &[PathBuf]) -> Result<(), String> {
+    run(Command::new("gio").arg("trash").arg("--").args(paths)).map(|_| ())
+}
+
+/// Drops log lines for songs under `paths`, so trashed songs no longer count as downloaded.
+pub fn forget(paths: &[PathBuf]) -> Result<(), String> {
+    let file = log_file();
+    let Ok(text) = std::fs::read_to_string(&file) else { return Ok(()) };
+    std::fs::write(&file, forget_lines(&text, paths)).map_err(|e| e.to_string())
+}
+
+fn forget_lines(text: &str, paths: &[PathBuf]) -> String {
+    let gone = |line: &str| line.split_once('\t').is_some_and(|(_, p)| paths.iter().any(|d| Path::new(p).starts_with(d)));
+    text.lines().filter(|l| !gone(l)).map(|l| format!("{l}\n")).collect()
 }
 
 /// Ids Mixtape has downloaded before.
@@ -297,9 +378,30 @@ mod tests {
 
     #[test]
     fn paths_stay_inside_the_music_folder() {
-        let p = song_path(Path::new("/m"), &song("AC/DC", "../..", ".hidden"));
-        assert_eq!(p, Path::new("/m/AC_DC/_../hidden.mp3"));
-        assert_eq!(song_path(Path::new("/m"), &song("", "", "T")), Path::new("/m/Unknown Artist/Singles/T.mp3"));
+        assert_eq!(parts(&song("AC/DC", "../..", ".hidden")), ["AC_DC", "_..", "hidden"]);
+        assert_eq!(parts(&song("", "", "T")), ["Unknown Artist", "Singles", "T"]);
+    }
+
+    #[test]
+    fn old_settings_files_still_load() {
+        let s: Settings = serde_json::from_str(r#"{"music_dir":"/m","player":"vlc"}"#).unwrap();
+        assert!(s.format == Format::Mp3 && s.cookies_browser.is_empty());
+        let s: Settings = serde_json::from_str(r#"{"format":"original","cookies_browser":"firefox"}"#).unwrap();
+        assert!(s.format == Format::Original && s.cookies_browser == "firefox");
+    }
+
+    #[test]
+    fn forgetting_a_folder_forgets_its_songs() {
+        let log = "a\t/m/X/One.mp3\nb\t/m/X/Y/Two.mp3\nc\t/m/Xylo/Three.mp3\n";
+        assert_eq!(forget_lines(log, &[PathBuf::from("/m/X")]), "c\t/m/Xylo/Three.mp3\n");
+        assert_eq!(forget_lines(log, &[PathBuf::from("/m/Xylo/Three.mp3")]), "a\t/m/X/One.mp3\nb\t/m/X/Y/Two.mp3\n");
+    }
+
+    #[test]
+    fn source_quality() {
+        assert_eq!(describe_source("opus 129.055"), "129k Opus");
+        assert_eq!(describe_source("mp4a.40.2 256.0"), "256k AAC");
+        assert_eq!(describe_source("opus NA"), "Opus");
     }
 
     #[test]
