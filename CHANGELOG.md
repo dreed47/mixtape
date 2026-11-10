@@ -4,7 +4,7 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 `Cargo.toml`, shows in the window's footer, and each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 0.3.0
 
 - Album downloads keep album order: files start with the track number
   (`01 Bohemian Rhapsody.mp3`) and get a track number tag.
