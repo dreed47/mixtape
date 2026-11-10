@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const YTMUSIC_PY: &str = include_str!("ytmusic.py");
+/// Any 1.x keeps getting YouTube Music fixes; a 2.0 could rename what ytmusic.py uses, so it's
+/// only allowed after the helper is checked against it.
+const YTMUSICAPI: &str = "ytmusicapi>=1.12,<2";
 const AUDIO_EXTS: [&str; 8] = ["mp3", "m4a", "flac", "ogg", "opus", "wav", "aac", "wma"];
 
 /// Players offered in Settings when installed: (label, command).
@@ -396,7 +399,7 @@ pub fn friendly(raw: &str) -> String {
 }
 
 fn ytmusic(mode: &str, arg: &str) -> Result<String, String> {
-    run(Command::new("uv").args(["run", "-q", "--no-project", "--with", "ytmusicapi", "python", "-I", "-c", YTMUSIC_PY, mode, arg]))
+    run(Command::new("uv").args(["run", "-q", "--no-project", "--with", YTMUSICAPI, "python", "-I", "-c", YTMUSIC_PY, mode, arg]))
 }
 
 /// A search, or a pasted YouTube / YouTube Music link to a song, album, playlist or artist.

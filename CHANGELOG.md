@@ -6,6 +6,8 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 
 ## Unreleased
 
+- The search helper asks uv for ytmusicapi 1.x (`>=1.12,<2`), so a future 2.0
+  can't break search before Mixtape is checked against it.
 - Keyboard shortcuts: Ctrl+1 / Ctrl+2 / Ctrl+, for the tabs, Ctrl+F for the
   search box or Library filter, Space to preview the result under the
   pointer, Ctrl+D to download, Delete to move to the Trash, F5 to rescan, Esc

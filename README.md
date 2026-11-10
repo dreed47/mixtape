@@ -88,7 +88,7 @@ changes nothing.
 - Linux with a Wayland or X11 desktop
 - [Rust](https://www.rust-lang.org/tools/install) (to build)
 - [uv](https://docs.astral.sh/uv/) (runs the YouTube Music search through
-  [ytmusicapi](https://github.com/sigma67/ytmusicapi); uv fetches it on first
+  [ytmusicapi](https://github.com/sigma67/ytmusicapi) 1.x; uv fetches it on first
   search)
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [FFmpeg](https://ffmpeg.org)
 - A music player, for example Amberol, VLC, or mpv
