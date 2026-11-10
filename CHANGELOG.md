@@ -4,7 +4,7 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 `Cargo.toml`, shows in the window's footer, and each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 0.4.0
 
 - GitHub Actions checks formatting, lints, tests, the search helper and the
   shell scripts on every push and pull request. The README shows the status.
