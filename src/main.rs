@@ -74,10 +74,10 @@ impl Preview {
 
     /// Forgets a preview that has played to the end.
     fn poll(&mut self) {
-        if let Some((_, child)) = &mut self.playing {
-            if !matches!(child.try_wait(), Ok(None)) {
-                self.playing = None;
-            }
+        if let Some((_, child)) = &mut self.playing
+            && !matches!(child.try_wait(), Ok(None))
+        {
+            self.playing = None;
         }
     }
 }
@@ -391,10 +391,10 @@ impl App {
                     ui.strong(&song.title);
                     ui.label(&song.artists);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(Job::Failed(_)) = self.jobs.get(&song.id) {
-                            if ui.small_button("Retry").clicked() {
-                                retry = Some(song.clone());
-                            }
+                        if let Some(Job::Failed(_)) = self.jobs.get(&song.id)
+                            && ui.small_button("Retry").clicked()
+                        {
+                            retry = Some(song.clone());
                         }
                         job_status(ui, self.jobs.get(&song.id), false);
                     });
@@ -506,11 +506,11 @@ impl App {
                         if ui.button(arrow).on_hover_text("Show tracks").clicked() {
                             a.open = !a.open;
                         }
-                        if ui.checkbox(&mut a.checked, "").on_hover_text("Select every track not already in your library").changed() {
-                            if let Some(tracks) = &mut a.tracks {
-                                for t in tracks {
-                                    t.checked = a.checked && !in_library(logged, scan, &t.song);
-                                }
+                        if ui.checkbox(&mut a.checked, "").on_hover_text("Select every track not already in your library").changed()
+                            && let Some(tracks) = &mut a.tracks
+                        {
+                            for t in tracks {
+                                t.checked = a.checked && !in_library(logged, scan, &t.song);
                             }
                         }
                         ui.vertical(|ui| {
@@ -527,14 +527,14 @@ impl App {
                     if let Some(e) = &a.error {
                         error_line(ui, e);
                     }
-                    if a.open {
-                        if let Some(tracks) = &mut a.tracks {
-                            ui.indent(&a.album.id, |ui| {
-                                for row in tracks.iter_mut() {
-                                    song_row(ui, row, jobs, logged, scan, &mut wants_confirm, preview);
-                                }
-                            });
-                        }
+                    if a.open
+                        && let Some(tracks) = &mut a.tracks
+                    {
+                        ui.indent(&a.album.id, |ui| {
+                            for row in tracks.iter_mut() {
+                                song_row(ui, row, jobs, logged, scan, &mut wants_confirm, preview);
+                            }
+                        });
                     }
                 }
                 ui.add_space(8.0);
@@ -546,10 +546,10 @@ impl App {
                 }
             }
         });
-        if let Some(id) = self.preview.clicked.take() {
-            if let Err(e) = self.preview.toggle(id) {
-                self.status = Some(e);
-            }
+        if let Some(id) = self.preview.clicked.take()
+            && let Err(e) = self.preview.toggle(id)
+        {
+            self.status = Some(e);
         }
         if let Some(song) = wants_confirm {
             self.confirm = Some(song);
@@ -602,27 +602,24 @@ impl App {
             let n = self.selected.len();
             let mut picked: Vec<PathBuf> = self.selected.iter().cloned().collect();
             picked.sort();
-            if ui.add_enabled(n > 0, egui::Button::new(format!("Play selected ({n})"))).clicked() {
-                if let Err(e) = backend::open_with(&self.settings.player, &picked) {
-                    self.status = Some(e);
-                }
+            if ui.add_enabled(n > 0, egui::Button::new(format!("Play selected ({n})"))).clicked()
+                && let Err(e) = backend::open_with(&self.settings.player, &picked)
+            {
+                self.status = Some(e);
             }
             // Never the music folder itself, and nothing inside a folder that's also going.
-            let trash: Vec<PathBuf> = picked
-                .iter()
-                .filter(|p| **p != dir && !picked.iter().any(|q| q != *p && p.starts_with(q)))
-                .cloned()
-                .collect();
+            let trash: Vec<PathBuf> =
+                picked.iter().filter(|p| **p != dir && !picked.iter().any(|q| q != *p && p.starts_with(q))).cloned().collect();
             if ui.add_enabled(!trash.is_empty(), egui::Button::new(format!("Move to Trash ({})", trash.len()))).clicked() {
                 self.trash_confirm = Some(trash);
             }
             if ui.add_enabled(n > 0, egui::Button::new("Clear selection")).clicked() {
                 self.selected.clear();
             }
-            if ui.button("Open in file manager").on_hover_text("Open the music folder").clicked() {
-                if let Err(e) = backend::open_with("xdg-open", &[dir.clone()]) {
-                    self.status = Some(e);
-                }
+            if ui.button("Open in file manager").on_hover_text("Open the music folder").clicked()
+                && let Err(e) = backend::open_with("xdg-open", std::slice::from_ref(&dir))
+            {
+                self.status = Some(e);
             }
             if ui.button("Refresh").clicked() {
                 self.rescan(ui.ctx());
@@ -686,7 +683,17 @@ impl App {
         let (action, wanted) = (tree.action, tree.wanted);
         if !wanted.is_empty() {
             self.probing.extend(wanted.iter().cloned());
-            self.spawn(ui.ctx(), move |_| Msg::Probed(wanted.into_iter().map(|p| { let i = backend::probe(&p); (p, i) }).collect()));
+            self.spawn(ui.ctx(), move |_| {
+                Msg::Probed(
+                    wanted
+                        .into_iter()
+                        .map(|p| {
+                            let i = backend::probe(&p);
+                            (p, i)
+                        })
+                        .collect(),
+                )
+            });
         }
         let result = match action {
             Some(LibraryAction::Play(song)) => backend::open_with(&self.settings.player, &[song]),
@@ -890,7 +897,11 @@ impl App {
             ui.label("Format");
             ui.vertical(|ui| {
                 ui.radio_value(&mut self.settings.format, Format::Mp3, "MP3: plays everywhere");
-                ui.radio_value(&mut self.settings.format, Format::Original, "Original: best quality, no conversion (Opus, or AAC with Premium)");
+                ui.radio_value(
+                    &mut self.settings.format,
+                    Format::Original,
+                    "Original: best quality, no conversion (Opus, or AAC with Premium)",
+                );
                 ui.small("Original files are about half the size. Some car stereos and older devices can't play Opus.");
             });
             ui.end_row();
@@ -917,7 +928,9 @@ impl App {
             ui.label("Text size");
             ui.horizontal(|ui| {
                 let slider = ui.add(
-                    egui::Slider::new(&mut self.draft.text_scale, backend::TEXT_SCALES).step_by(0.1).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                    egui::Slider::new(&mut self.draft.text_scale, backend::TEXT_SCALES)
+                        .step_by(0.1)
+                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
                 );
                 // Resizing mid-drag would move the slider out from under the pointer.
                 if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
@@ -947,8 +960,10 @@ impl App {
                         }
                     });
                 }
-                ui.small("Premium gets 256 kbps AAC instead of 130 kbps. Sign in to music.youtube.com in that browser first. \
-                          Mixtape only passes the browser's name to yt-dlp, which reads the login on this computer.");
+                ui.small(
+                    "Premium gets 256 kbps AAC instead of 130 kbps. Sign in to music.youtube.com in that browser first. \
+                          Mixtape only passes the browser's name to yt-dlp, which reads the login on this computer.",
+                );
             });
             ui.end_row();
         });
@@ -957,10 +972,10 @@ impl App {
             ui.colored_label(ui.visuals().warn_fg_color, "That folder doesn't exist, so the music folder hasn't changed.");
         }
         ui.weak("Changes are saved automatically.");
-        if self.settings != before {
-            if let Err(e) = self.settings.save() {
-                self.status = Some(format!("Could not save settings: {e}"));
-            }
+        if self.settings != before
+            && let Err(e) = self.settings.save()
+        {
+            self.status = Some(format!("Could not save settings: {e}"));
         }
     }
 
@@ -1148,16 +1163,16 @@ fn folder_row(ui: &mut egui::Ui, folder: &Folder, tree: &mut Tree, root: bool) {
         return;
     }
     let id = ui.make_persistent_id(&folder.path);
-    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, root)
-        .show_header(ui, |ui| header(ui, tree))
-        .body(|ui| {
+    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, root).show_header(ui, |ui| header(ui, tree)).body(
+        |ui| {
             for child in &folder.children {
                 folder_row(ui, child, tree, false);
             }
             for file in &folder.files {
                 file_row(ui, file, &file.file_stem().unwrap_or_default().to_string_lossy(), tree);
             }
-        });
+        },
+    );
 }
 
 impl eframe::App for App {

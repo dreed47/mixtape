@@ -10,8 +10,7 @@ const YTMUSIC_PY: &str = include_str!("ytmusic.py");
 const AUDIO_EXTS: [&str; 8] = ["mp3", "m4a", "flac", "ogg", "opus", "wav", "aac", "wma"];
 
 /// Players offered in Settings when installed: (label, command).
-pub const PLAYERS: [(&str, &str); 3] =
-    [("Amberol", "amberol"), ("VLC", "vlc"), ("mpv", "mpv --player-operation-mode=pseudo-gui")];
+pub const PLAYERS: [(&str, &str); 3] = [("Amberol", "amberol"), ("VLC", "vlc"), ("mpv", "mpv --player-operation-mode=pseudo-gui")];
 
 #[derive(Deserialize, Clone)]
 pub struct Song {
@@ -123,7 +122,14 @@ pub fn detected_browsers() -> Vec<(&'static str, &'static str)> {
 impl Default for Settings {
     fn default() -> Self {
         let player = detected_players().first().map_or("xdg-open", |p| p.1).to_string();
-        Self { music_dir: home().join("Music"), player, format: Format::Mp3, cookies_browser: String::new(), check_updates: true, text_scale: 1.0 }
+        Self {
+            music_dir: home().join("Music"),
+            player,
+            format: Format::Mp3,
+            cookies_browser: String::new(),
+            check_updates: true,
+            text_scale: 1.0,
+        }
     }
 }
 
@@ -163,8 +169,22 @@ pub struct Tool {
 pub const TOOLS: [Tool; 6] = [
     Tool { bin: "uv", needed_for: "searching YouTube Music", required: true, arch: "uv", debian: None, fedora: "uv" },
     Tool { bin: "yt-dlp", needed_for: "downloading", required: true, arch: "yt-dlp", debian: Some("yt-dlp"), fedora: "yt-dlp" },
-    Tool { bin: "ffmpeg", needed_for: "converting audio and cover art", required: true, arch: "ffmpeg", debian: Some("ffmpeg"), fedora: "ffmpeg" },
-    Tool { bin: "ffprobe", needed_for: "song details in the Library", required: true, arch: "ffmpeg", debian: Some("ffmpeg"), fedora: "ffmpeg" },
+    Tool {
+        bin: "ffmpeg",
+        needed_for: "converting audio and cover art",
+        required: true,
+        arch: "ffmpeg",
+        debian: Some("ffmpeg"),
+        fedora: "ffmpeg",
+    },
+    Tool {
+        bin: "ffprobe",
+        needed_for: "song details in the Library",
+        required: true,
+        arch: "ffmpeg",
+        debian: Some("ffmpeg"),
+        fedora: "ffmpeg",
+    },
     Tool { bin: "mpv", needed_for: "previews", required: false, arch: "mpv", debian: Some("mpv"), fedora: "mpv" },
     Tool { bin: "gio", needed_for: "Move to Trash", required: false, arch: "glib2", debian: Some("libglib2.0-bin"), fedora: "glib2" },
 ];
@@ -321,7 +341,9 @@ fn tail(stderr: &[u8]) -> String {
 pub fn friendly(raw: &str) -> String {
     let has = |needles: &[&str]| needles.iter().any(|n| raw.to_lowercase().contains(&n.to_lowercase()));
     let known = if has(&["not a bot"]) {
-        Some("YouTube wants to confirm you're not a bot. Wait a while and try again, or turn on the Premium login in Settings so yt-dlp uses your browser's sign-in.")
+        Some(
+            "YouTube wants to confirm you're not a bot. Wait a while and try again, or turn on the Premium login in Settings so yt-dlp uses your browser's sign-in.",
+        )
     } else if has(&["in your country", "not made this video available"]) {
         Some("This song isn't available in your country.")
     } else if has(&["private video"]) {
@@ -331,10 +353,21 @@ pub fn friendly(raw: &str) -> String {
     } else if has(&["confirm your age", "age-restricted"]) {
         Some("YouTube needs a signed-in adult account for this song. Turn on the Premium login in Settings to use your browser's sign-in.")
     } else if has(&["cookie", "failed to decrypt"]) {
-        Some("yt-dlp couldn't read your YouTube login from the browser chosen in Settings. Check that you're signed in to music.youtube.com there, or turn off the Premium login.")
-    } else if has(&["http error 403", "signature extraction", "nsig extraction", "requested format is not available", "unable to extract"]) {
+        Some(
+            "yt-dlp couldn't read your YouTube login from the browser chosen in Settings. Check that you're signed in to music.youtube.com there, or turn off the Premium login.",
+        )
+    } else if has(&["http error 403", "signature extraction", "nsig extraction", "requested format is not available", "unable to extract"])
+    {
         Some("YouTube changed something this version of yt-dlp can't handle yet. Updating yt-dlp usually fixes it.")
-    } else if has(&["name resolution", "name or service not known", "network is unreachable", "connectionerror", "timed out", "connection refused", "failed to fetch"]) {
+    } else if has(&[
+        "name resolution",
+        "name or service not known",
+        "network is unreachable",
+        "connectionerror",
+        "timed out",
+        "connection refused",
+        "failed to fetch",
+    ]) {
         Some("Couldn't reach YouTube. Check your internet connection.")
     } else if has(&["no space left"]) {
         Some("The disk with your music folder is full.")
@@ -697,7 +730,7 @@ impl Scan {
 pub fn scan(dir: &Path) -> Scan {
     let (mut keys, mut all) = (HashSet::new(), Vec::new());
     let root = walk(dir, dir.display().to_string(), &mut keys, &mut all);
-    all.sort_by(|a, b| b.1.cmp(&a.1));
+    all.sort_by_key(|f| std::cmp::Reverse(f.1));
     Scan { keys, root, all }
 }
 

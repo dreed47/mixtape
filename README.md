@@ -1,5 +1,7 @@
 # Mixtape
 
+[![CI](https://github.com/dreed47/mixtape/actions/workflows/ci.yml/badge.svg)](https://github.com/dreed47/mixtape/actions/workflows/ci.yml)
+
 A small desktop app for Linux that searches YouTube Music, downloads songs as
 MP3 into an `Artist/Album/` folder structure, and opens folders of your music
 in the player you choose. It follows the [Omarchy](https://omarchy.org) theme
@@ -132,6 +134,8 @@ Mixtape respects `XDG_CONFIG_HOME` and `XDG_DATA_HOME`.
 ```bash
 cargo run          # run from source
 cargo test         # unit tests
+cargo fmt          # format (CI checks it)
+cargo clippy --all-targets -- -D warnings   # lints (CI checks it)
 ```
 
 In a development copy, create an empty `.mixtape-dev` file in the repository

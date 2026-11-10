@@ -6,6 +6,8 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 
 ## Unreleased
 
+- GitHub Actions checks formatting, lints, tests, the search helper and the
+  shell scripts on every push and pull request. The README shows the status.
 - The music folder's own row in the Library has no tick box, so it can't be
   selected for **Move to Trash**.
 - Settings apply and save as you change them; there's no Save button. The

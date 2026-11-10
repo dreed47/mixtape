@@ -1,2 +1,3 @@
 target/
 .mixtape-dev
+__pycache__/
