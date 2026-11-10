@@ -6,6 +6,12 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 
 ## Unreleased
 
+- The music folder's own row in the Library has no tick box, so it can't be
+  selected for **Move to Trash**.
+- Settings apply and save as you change them; there's no Save button. The
+  music folder applies when you leave its box or pick one with **Browse**,
+  and only if it exists. The text size applies when you let go of the
+  slider.
 - A cassette app icon, installed by `bin/install.sh`.
 - A setup check: when uv, yt-dlp, ffmpeg or ffprobe is missing, a banner
   says what each is for and shows the install command for your distribution

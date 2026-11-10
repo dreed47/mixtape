@@ -352,7 +352,12 @@ impl App {
                     (Ok(()), _) => Update::None,
                 };
             }
-            Msg::Picked(dir) => self.draft.music_dir = dir.unwrap_or(self.draft.music_dir.clone()),
+            Msg::Picked(dir) => {
+                if let Some(dir) = dir {
+                    self.draft.music_dir = dir;
+                    self.apply_music_dir(ctx);
+                }
+            }
         }
     }
 
@@ -841,13 +846,20 @@ impl App {
         }
     }
 
+    /// Settings apply and save as they change. The music folder applies when you leave its box
+    /// (or pick one with Browse), and the text size when you let go of the slider.
     fn settings_tab(&mut self, ui: &mut egui::Ui) {
+        let before = self.settings.clone();
         egui::Grid::new("settings").num_columns(2).spacing([12.0, 12.0]).show(ui, |ui| {
             ui.label("Music folder");
             ui.horizontal(|ui| {
                 let mut text = self.draft.music_dir.display().to_string();
-                if ui.add(egui::TextEdit::singleline(&mut text).desired_width(360.0)).changed() {
+                let edit = ui.add(egui::TextEdit::singleline(&mut text).desired_width(360.0));
+                if edit.changed() {
                     self.draft.music_dir = PathBuf::from(text);
+                }
+                if edit.lost_focus() {
+                    self.apply_music_dir(ui.ctx());
                 }
                 if ui.button("Browse…").clicked() {
                     let start = self.draft.music_dir.clone();
@@ -859,17 +871,17 @@ impl App {
             ui.label("Player");
             ui.vertical(|ui| {
                 let players = backend::detected_players();
-                let current = players.iter().find(|p| p.1 == self.draft.player).map_or("Custom command", |p| p.0);
+                let current = players.iter().find(|p| p.1 == self.settings.player).map_or("Custom command", |p| p.0);
                 egui::ComboBox::from_id_salt("player").selected_text(current).show_ui(ui, |ui| {
                     for (name, cmd) in &players {
-                        ui.selectable_value(&mut self.draft.player, cmd.to_string(), *name);
+                        ui.selectable_value(&mut self.settings.player, cmd.to_string(), *name);
                     }
                     if ui.selectable_label(current == "Custom command", "Custom command").clicked() && current != "Custom command" {
-                        self.draft.player.clear();
+                        self.settings.player.clear();
                     }
                 });
                 if current == "Custom command" {
-                    ui.add(egui::TextEdit::singleline(&mut self.draft.player).hint_text("e.g. strawberry").desired_width(360.0));
+                    ui.add(egui::TextEdit::singleline(&mut self.settings.player).hint_text("e.g. strawberry").desired_width(360.0));
                     ui.small("Mixtape adds the selected folders after the command.");
                 }
             });
@@ -877,8 +889,8 @@ impl App {
 
             ui.label("Format");
             ui.vertical(|ui| {
-                ui.radio_value(&mut self.draft.format, Format::Mp3, "MP3: plays everywhere");
-                ui.radio_value(&mut self.draft.format, Format::Original, "Original: best quality, no conversion (Opus, or AAC with Premium)");
+                ui.radio_value(&mut self.settings.format, Format::Mp3, "MP3: plays everywhere");
+                ui.radio_value(&mut self.settings.format, Format::Original, "Original: best quality, no conversion (Opus, or AAC with Premium)");
                 ui.small("Original files are about half the size. Some car stereos and older devices can't play Opus.");
             });
             ui.end_row();
@@ -904,27 +916,34 @@ impl App {
 
             ui.label("Text size");
             ui.horizontal(|ui| {
-                ui.add(egui::Slider::new(&mut self.draft.text_scale, backend::TEXT_SCALES).step_by(0.1).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+                let slider = ui.add(
+                    egui::Slider::new(&mut self.draft.text_scale, backend::TEXT_SCALES).step_by(0.1).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                );
+                // Resizing mid-drag would move the slider out from under the pointer.
+                if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                    self.settings.text_scale = self.draft.text_scale;
+                    ui.ctx().set_zoom_factor(self.settings.text_scale);
+                }
                 ui.small("Ctrl + and Ctrl − work anywhere");
             });
             ui.end_row();
 
             ui.label("Updates");
-            ui.checkbox(&mut self.draft.check_updates, "Check GitHub for a new version at startup and once a day");
+            ui.checkbox(&mut self.settings.check_updates, "Check GitHub for a new version at startup and once a day");
             ui.end_row();
 
             ui.label("Premium");
             ui.vertical(|ui| {
                 let browsers = backend::detected_browsers();
-                let mut premium = !self.draft.cookies_browser.is_empty();
+                let mut premium = !self.settings.cookies_browser.is_empty();
                 if ui.add_enabled(!browsers.is_empty(), egui::Checkbox::new(&mut premium, "Use my YouTube Music Premium login")).changed() {
-                    self.draft.cookies_browser = if premium { browsers[0].1.to_string() } else { String::new() };
+                    self.settings.cookies_browser = if premium { browsers[0].1.to_string() } else { String::new() };
                 }
                 if premium {
-                    let current = browsers.iter().find(|b| b.1 == self.draft.cookies_browser).map_or("Choose a browser", |b| b.0);
+                    let current = browsers.iter().find(|b| b.1 == self.settings.cookies_browser).map_or("Choose a browser", |b| b.0);
                     egui::ComboBox::from_id_salt("browser").selected_text(current).show_ui(ui, |ui| {
                         for (name, id) in &browsers {
-                            ui.selectable_value(&mut self.draft.cookies_browser, id.to_string(), *name);
+                            ui.selectable_value(&mut self.settings.cookies_browser, id.to_string(), *name);
                         }
                     });
                 }
@@ -934,20 +953,29 @@ impl App {
             ui.end_row();
         });
         ui.add_space(12.0);
-        let changed = self.draft != self.settings;
-        if ui.add_enabled(changed, egui::Button::new("Save")).clicked() {
-            let folder_changed = self.draft.music_dir != self.settings.music_dir;
-            self.settings = self.draft.clone();
-            ui.ctx().set_zoom_factor(self.settings.text_scale);
-            match self.settings.save() {
-                Ok(()) => self.notify("Settings saved".into()),
-                Err(e) => self.status = Some(format!("Could not save settings: {e}")),
-            }
-            if folder_changed {
-                self.selected.clear();
-                self.rescan(ui.ctx());
+        if self.draft.music_dir != self.settings.music_dir && !self.draft.music_dir.is_dir() {
+            ui.colored_label(ui.visuals().warn_fg_color, "That folder doesn't exist, so the music folder hasn't changed.");
+        }
+        ui.weak("Changes are saved automatically.");
+        if self.settings != before {
+            if let Err(e) = self.settings.save() {
+                self.status = Some(format!("Could not save settings: {e}"));
             }
         }
+    }
+
+    /// Switches to the folder typed or picked in Settings, if it exists.
+    fn apply_music_dir(&mut self, ctx: &egui::Context) {
+        if self.draft.music_dir == self.settings.music_dir || !self.draft.music_dir.is_dir() {
+            return;
+        }
+        self.settings.music_dir = self.draft.music_dir.clone();
+        match self.settings.save() {
+            Ok(()) => self.notify("Music folder changed".into()),
+            Err(e) => self.status = Some(format!("Could not save settings: {e}")),
+        }
+        self.selected.clear();
+        self.rescan(ctx);
     }
 }
 
@@ -1101,9 +1129,11 @@ struct Tree<'a> {
 
 /// One folder in the Library tree, then its subfolders and songs, each with a tick box.
 /// Double-click plays a song; right-click opens a menu.
-fn folder_row(ui: &mut egui::Ui, folder: &Folder, tree: &mut Tree, default_open: bool) {
+fn folder_row(ui: &mut egui::Ui, folder: &Folder, tree: &mut Tree, root: bool) {
     let header = |ui: &mut egui::Ui, tree: &mut Tree| {
-        select_box(ui, &folder.path, tree.selected, &folder.name).context_menu(|ui| {
+        // The music folder itself has no tick box, so it can never be selected for the Trash.
+        let row = if root { ui.strong(&folder.name) } else { select_box(ui, &folder.path, tree.selected, &folder.name) };
+        row.context_menu(|ui| {
             if ui.button("Open in file manager").clicked() {
                 tree.action = Some(LibraryAction::Reveal(folder.path.clone()));
                 ui.close();
@@ -1118,7 +1148,7 @@ fn folder_row(ui: &mut egui::Ui, folder: &Folder, tree: &mut Tree, default_open:
         return;
     }
     let id = ui.make_persistent_id(&folder.path);
-    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, default_open)
+    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, root)
         .show_header(ui, |ui| header(ui, tree))
         .body(|ui| {
             for child in &folder.children {
@@ -1178,6 +1208,11 @@ impl eframe::App for App {
                 None => {}
             }
             ui.separator();
+            // A folder typed in Settings but not confirmed applies (or is dropped) on leaving the tab.
+            if self.tab != Tab::Settings && self.draft.music_dir != self.settings.music_dir {
+                self.apply_music_dir(ui.ctx());
+                self.draft.music_dir = self.settings.music_dir.clone();
+            }
             match self.tab {
                 Tab::Search => self.search_tab(ui),
                 Tab::Library => self.library_tab(ui),
