@@ -1061,6 +1061,45 @@ pub fn folder_cover(folder: &Path, files: &[PathBuf]) -> Option<PathBuf> {
     (ok && out.is_file()).then_some(out)
 }
 
+/// A picture for an artist folder: its artist.jpg (or folder.jpg), else the artist's photo on
+/// YouTube Music, else the cover of its first album (`songs` are that album's songs).
+/// The photo's link is looked up once per artist and kept in ~/.cache/mixtape/artists, even
+/// when there's none, so YouTube Music isn't asked again.
+pub fn artist_picture(folder: &Path, songs: &[PathBuf]) -> Option<String> {
+    for name in ["artist.jpg", "folder.jpg", "artist.png", "folder.png"] {
+        let file = folder.join(name);
+        if file.is_file() {
+            return Some(format!("file://{}", file.display()));
+        }
+    }
+    let name = folder.file_name()?.to_string_lossy().into_owned();
+    let id = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        norm(&name).hash(&mut h);
+        h.finish()
+    };
+    let cached = xdg("XDG_CACHE_HOME", ".cache").join(format!("mixtape/artists/{id:016x}"));
+    let url = std::fs::read_to_string(&cached).ok().or_else(|| {
+        if cfg!(test) {
+            return None; // tests never reach YouTube Music
+        }
+        // Not cached on a failed lookup (offline), so it's tried again next time.
+        let url: String = serde_json::from_str(&ytmusic("photo", &name).ok()?).ok()?;
+        let url = if url.starts_with("https://") { url } else { String::new() };
+        std::fs::create_dir_all(cached.parent()?).ok()?;
+        std::fs::write(&cached, &url).ok()?;
+        Some(url)
+    });
+    match url {
+        Some(url) if url.starts_with("https://") => Some(url),
+        _ => {
+            let album = songs.first()?.parent()?;
+            folder_cover(album, songs).map(|f| format!("file://{}", f.display()))
+        }
+    }
+}
+
 fn cache_file() -> PathBuf {
     xdg("XDG_CACHE_HOME", ".cache").join("mixtape/songs.json")
 }
@@ -1662,6 +1701,22 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(no_trash("Error trashing file: Unable to find or create trash directory"));
         assert!(!no_trash("Permission denied"));
+    }
+
+    #[test]
+    fn artist_picture_uses_the_folder_then_the_first_album() {
+        let dir = std::env::temp_dir().join(format!("mixtape-artist-{}", std::process::id()));
+        let album = dir.join("Queen/Greatest Hits");
+        std::fs::create_dir_all(&album).unwrap();
+        let song = album.join("01 Bohemian Rhapsody.mp3");
+        std::fs::write(&song, "").unwrap();
+        std::fs::write(album.join("cover.jpg"), "").unwrap();
+        let artist = dir.join("Queen");
+        // No photo looked up in tests, so the first album's cover stands in.
+        assert_eq!(artist_picture(&artist, std::slice::from_ref(&song)), Some(format!("file://{}", album.join("cover.jpg").display())));
+        std::fs::write(artist.join("artist.jpg"), "").unwrap();
+        assert_eq!(artist_picture(&artist, &[song]), Some(format!("file://{}", artist.join("artist.jpg").display())));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

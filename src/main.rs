@@ -51,7 +51,7 @@ enum Msg {
     ResolveDone(u64),
     Probed(Vec<(PathBuf, backend::AudioInfo)>),
     /// Album folders and their cover picture, if they have one.
-    Covers(Vec<(PathBuf, Option<PathBuf>)>),
+    Covers(Vec<(PathBuf, Option<String>)>),
     /// Each dependency's installed version and path, for Settings.
     Versions(Vec<(&'static str, Option<String>, Option<PathBuf>)>),
     /// The JavaScript runtime yt-dlp can use, and whether its challenge solver is installed.
@@ -145,7 +145,8 @@ struct App {
     details: HashMap<PathBuf, backend::AudioInfo>,
     probing: HashSet<PathBuf>,
     /// Cover picture for each album folder shown in the Library (None: it has none).
-    covers: HashMap<PathBuf, Option<PathBuf>>,
+    /// Folder -> its picture's file:// or https:// address, if it has one.
+    covers: HashMap<PathBuf, Option<String>>,
     covers_pending: HashSet<PathBuf>,
     /// Dependency versions and paths for Settings, read in the background.
     versions: HashMap<&'static str, (Option<String>, Option<PathBuf>)>,

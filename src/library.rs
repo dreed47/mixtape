@@ -106,32 +106,44 @@ pub(crate) struct Tree<'a> {
     pub(crate) probing: &'a HashSet<PathBuf>,
     /// Shown songs whose details haven't been read yet.
     pub(crate) wanted: Vec<PathBuf>,
-    pub(crate) covers: &'a HashMap<PathBuf, Option<PathBuf>>,
+    pub(crate) covers: &'a HashMap<PathBuf, Option<String>>,
     pub(crate) covers_pending: &'a HashSet<PathBuf>,
-    /// Album folders shown whose cover hasn't been looked for yet.
-    pub(crate) wanted_covers: Vec<(PathBuf, Vec<PathBuf>)>,
+    /// Folders shown whose picture hasn't been looked for yet: folder, songs for a cover, is an artist.
+    pub(crate) wanted_covers: Vec<(PathBuf, Vec<PathBuf>, bool)>,
 }
 
 /// One folder in the Library tree, then its subfolders and songs, each with a tick box.
 /// Double-click plays a song; right-click opens a menu.
-pub(crate) fn folder_row(ui: &mut egui::Ui, folder: &Folder, tree: &mut Tree, root: bool) {
+/// The songs of the first folder under `folder` that has any.
+fn first_album(folder: &Folder) -> &[PathBuf] {
+    if !folder.files.is_empty() {
+        return &folder.files;
+    }
+    folder.children.iter().map(first_album).find(|f| !f.is_empty()).unwrap_or(&[])
+}
+
+/// `depth` 0 is the music folder itself, 1 an artist folder.
+pub(crate) fn folder_row(ui: &mut egui::Ui, folder: &Folder, tree: &mut Tree, depth: usize) {
+    let artist = depth == 1;
     let header = |ui: &mut egui::Ui, tree: &mut Tree| {
         // The music folder itself has no tick box, so it can never be selected for the Trash.
-        // Tick box, then (for an album folder, one with songs in it) its cover, then the name.
-        let row = if root {
+        // Tick box, then a picture (an album's cover, an artist's round photo), then the name.
+        let row = if depth == 0 {
             ui.strong(&folder.name)
-        } else if folder.files.is_empty() {
+        } else if folder.files.is_empty() && !artist {
             select_box(ui, &folder.path, tree.selected, &folder.name)
         } else {
             select_box(ui, &folder.path, tree.selected, "");
             match tree.covers.get(&folder.path) {
-                Some(Some(file)) => {
-                    ui.add(
-                        egui::Image::new(format!("file://{}", file.display())).fit_to_exact_size(egui::vec2(24.0, 24.0)).corner_radius(2.0),
-                    );
+                Some(Some(uri)) => {
+                    let round = if artist { 12.0 } else { 2.0 };
+                    ui.add(egui::Image::new(uri.as_str()).fit_to_exact_size(egui::vec2(24.0, 24.0)).corner_radius(round));
                 }
                 Some(None) => {}
-                None if !tree.covers_pending.contains(&folder.path) => tree.wanted_covers.push((folder.path.clone(), folder.files.clone())),
+                None if !tree.covers_pending.contains(&folder.path) => {
+                    let songs = if artist { first_album(folder).to_vec() } else { folder.files.clone() };
+                    tree.wanted_covers.push((folder.path.clone(), songs, artist));
+                }
                 None => {}
             }
             ui.add(egui::Label::new(&folder.name).sense(egui::Sense::click()))
@@ -151,10 +163,10 @@ pub(crate) fn folder_row(ui: &mut egui::Ui, folder: &Folder, tree: &mut Tree, ro
         return;
     }
     let id = ui.make_persistent_id(&folder.path);
-    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, root).show_header(ui, |ui| header(ui, tree)).body(
+    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, depth == 0).show_header(ui, |ui| header(ui, tree)).body(
         |ui| {
             for child in &folder.children {
-                folder_row(ui, child, tree, false);
+                folder_row(ui, child, tree, depth + 1);
             }
             for file in &folder.files {
                 file_row(ui, file, &file.file_stem().unwrap_or_default().to_string_lossy(), tree);
@@ -313,7 +325,7 @@ impl App {
                     }
                 }
             }
-            None => folder_row(ui, &scan.root, &mut tree, true),
+            None => folder_row(ui, &scan.root, &mut tree, 0),
             Some(files) if files.is_empty() => {
                 ui.weak("No songs match.");
             }
@@ -328,17 +340,20 @@ impl App {
         });
         let (action, wanted, wanted_covers) = (tree.action, tree.wanted, tree.wanted_covers);
         if !wanted_covers.is_empty() {
-            self.covers_pending.extend(wanted_covers.iter().map(|(f, _)| f.clone()));
-            self.spawn(ui.ctx(), move |_| {
-                Msg::Covers(
-                    wanted_covers
-                        .into_iter()
-                        .map(|(folder, files)| {
-                            let cover = backend::folder_cover(&folder, &files);
-                            (folder, cover)
-                        })
-                        .collect(),
-                )
+            self.covers_pending.extend(wanted_covers.iter().map(|(f, _, _)| f.clone()));
+            let ctx = ui.ctx().clone();
+            self.spawn(ui.ctx(), move |tx| {
+                // One at a time: an artist photo lookup takes a second or two.
+                for (folder, songs, artist) in wanted_covers {
+                    let cover = if artist {
+                        backend::artist_picture(&folder, &songs)
+                    } else {
+                        backend::folder_cover(&folder, &songs).map(|f| format!("file://{}", f.display()))
+                    };
+                    let _ = tx.send(Msg::Covers(vec![(folder, cover)]));
+                    ctx.request_repaint();
+                }
+                Msg::Covers(vec![])
             });
         }
         if !wanted.is_empty() {

@@ -10,6 +10,10 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
   lists where each one will land (Artist / Album (Year) / NN Title), or that
   it couldn't be found and stays as it is. Untick a wrong match; nothing
   downloads until you click **Fix N songs**.
+- Artist folders in Library show the artist's photo in a circle. It comes
+  from an artist.jpg or folder.jpg in the folder, else YouTube Music (looked
+  up once and cached), else the first album's cover. Nothing is written to
+  the music folder.
 
 ## 0.7.0
 

@@ -1,5 +1,5 @@
 # Mixtape search helper: talks to YouTube Music through ytmusicapi and prints JSON.
-# Usage: ytmusic.py search <query> | album <browseId> | artist <channelId> | link <url>
+# Usage: ytmusic.py search <query> | album <browseId> | artist <channelId> | photo <artist name> | link <url>
 import json
 import sys
 from urllib.parse import parse_qs, urlparse
@@ -123,6 +123,14 @@ def link(url):
     sys.exit("Mixtape can't open that kind of YouTube link.")
 
 
+def artist_photo(name):
+    """The photo of the artist called exactly `name` (any case), or "" when there's no such artist."""
+    for a in yt.search(name, filter="artists", limit=5):
+        if (a.get("artist") or "").casefold() == name.casefold():
+            return thumb(a)
+    return ""
+
+
 mode, arg = sys.argv[1], sys.argv[2]
 if mode == "search":
     print(json.dumps(search(arg)))
@@ -130,6 +138,8 @@ elif mode == "album":
     print(json.dumps(album_tracks(arg)))
 elif mode == "artist":
     print(json.dumps(artist(arg)))
+elif mode == "photo":
+    print(json.dumps(artist_photo(arg)))
 elif mode == "link":
     print(json.dumps(link(arg)))
 else:
