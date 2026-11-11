@@ -4,7 +4,7 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 `Cargo.toml`, shows in the window's footer, and each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 0.7.0
 
 - Search results you already have (in your library or just downloaded) show
   a ✔ before the title, so they stand out when you scan a list.
