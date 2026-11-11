@@ -45,10 +45,10 @@ enum Msg {
     Updated(Result<(), String>),
     Trashed(Vec<PathBuf>, Result<(), String>),
     Deleted(Vec<PathBuf>, Result<(), String>),
-    /// An old file and the YouTube Music song it came from, for Fix tags.
-    Resolved(PathBuf, Result<Song, String>),
-    /// Fix tags finished looking up songs; how many it couldn't.
-    ResolveDone(usize),
+    /// Fix tags run, an old file, and the YouTube Music song it came from.
+    Resolved(u64, PathBuf, Result<Song, String>),
+    /// That Fix tags run finished looking up songs.
+    ResolveDone(u64),
     Probed(Vec<(PathBuf, backend::AudioInfo)>),
     /// Album folders and their cover picture, if they have one.
     Covers(Vec<(PathBuf, Option<PathBuf>)>),
@@ -126,8 +126,10 @@ struct App {
     missing: Vec<&'static backend::Tool>,
     /// Selected songs and folders waiting on "Move to Trash?".
     trash_confirm: Option<Vec<PathBuf>>,
-    /// Songs waiting on "Fix tags?".
-    fix_confirm: Option<Vec<PathBuf>>,
+    /// Fix tags: looking up the songs, then the preview waiting on "Fix".
+    fix: Option<Fix>,
+    /// Counts Fix tags runs, so a cancelled run's late answers are ignored.
+    fix_runs: u64,
     /// Items the Trash couldn't take (the drive has none), waiting on "Delete permanently?".
     delete_confirm: Option<Vec<PathBuf>>,
     /// Old copies Fix tags couldn't trash for the same reason, asked about when the queue finishes.
@@ -218,7 +220,8 @@ impl App {
             missing: backend::missing_tools(),
             notice: None,
             trash_confirm: None,
-            fix_confirm: None,
+            fix: None,
+            fix_runs: 0,
             delete_confirm: None,
             untrashable: vec![],
             replaces: HashMap::new(),
@@ -419,15 +422,15 @@ impl App {
                     (Ok(()), _) => Update::None,
                 };
             }
-            Msg::Resolved(old, Ok(song)) => {
-                self.replaces.insert(song.id.clone(), old);
-                self.downloads.0.lock().overwrite.insert(song.id.clone());
-                self.enqueue(song);
+            Msg::Resolved(run, old, song) => {
+                if let Some(fix) = self.fix.as_mut().filter(|f| f.run == run) {
+                    let ticked = song.is_ok();
+                    fix.rows.push(FixRow { old, song, ticked });
+                }
             }
-            Msg::Resolved(_, Err(_)) => {}
-            Msg::ResolveDone(missed) => {
-                if missed > 0 {
-                    self.notify(format!("{missed} couldn't be found on YouTube Music, so they were left as they are"));
+            Msg::ResolveDone(run) => {
+                if let Some(fix) = self.fix.as_mut().filter(|f| f.run == run) {
+                    fix.done = true;
                 }
             }
             Msg::Picked(dir) => {

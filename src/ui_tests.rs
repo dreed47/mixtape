@@ -133,6 +133,37 @@ fn select_all_ticks_only_the_songs_shown_and_clears_again() {
 }
 
 #[test]
+fn fix_tags_previews_before_downloading() {
+    let (mut state, dir) = app("fix");
+    let mut found = song("abc", "Under Pressure");
+    found.album = "Hot Space".into();
+    found.track = Some(11);
+    found.year = "1982".into();
+    let rows = vec![
+        FixRow { old: dir.join("Queen/Singles/Under Pressure.opus"), song: Ok(found), ticked: true },
+        FixRow { old: dir.join("Abba/Gold/Dancin Queen.mp3"), song: Err("not found".into()), ticked: false },
+    ];
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    state.fix = Some(Fix { run: 1, total: 2, rows, done: true, cancel: cancel.clone() });
+    let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.fix_dialog(ui.ctx()), state);
+    harness.run();
+    harness.get_by_label("Fix tags on 1 song?");
+    harness.get_by_label("→ Queen / Hot Space (1982) / 11 Under Pressure");
+    harness.get_by_label("Not found, left alone");
+    // Unticking the only match leaves nothing to fix.
+    harness.get_by_label("Queen/Singles/Under Pressure.opus").click();
+    harness.run();
+    harness.get_by_label("Fix tags on 0 songs?");
+    assert!(harness.get_by_label("Fix 0 songs").accesskit_node().is_disabled());
+    harness.get_by_label("Cancel").click();
+    harness.run();
+    assert!(harness.state().fix.is_none());
+    assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+    assert!(harness.state().replaces.is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn trashing_a_folder_says_it_is_a_whole_folder() {
     let (mut state, dir) = app("trash");
     let album = dir.join("Queen/Greatest Hits");

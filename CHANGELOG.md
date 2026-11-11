@@ -4,6 +4,13 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 `Cargo.toml`, shows in the window's footer, and each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- **Fix tags** shows a preview first. It looks up every ticked song, then
+  lists where each one will land (Artist / Album (Year) / NN Title), or that
+  it couldn't be found and stays as it is. Untick a wrong match; nothing
+  downloads until you click **Fix N songs**.
+
 ## 0.7.0
 
 - Search results you already have (in your library or just downloaded) show

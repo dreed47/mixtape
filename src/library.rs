@@ -1,6 +1,8 @@
 //! The Library tab: the folder tree, flat lists, duplicates, and the Trash / delete / Fix tags dialogs.
 
 use crate::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// What a click in the Library tree asks for.
 pub(crate) enum LibraryAction {
@@ -8,6 +10,22 @@ pub(crate) enum LibraryAction {
     Stems(PathBuf),
     /// Open a folder in the file manager.
     Reveal(PathBuf),
+}
+
+/// Fix tags while it looks songs up and then shows what it would do.
+pub(crate) struct Fix {
+    pub(crate) run: u64,
+    pub(crate) total: usize,
+    pub(crate) rows: Vec<FixRow>,
+    pub(crate) done: bool,
+    /// Set on Cancel, so the lookups stop.
+    pub(crate) cancel: Arc<AtomicBool>,
+}
+
+pub(crate) struct FixRow {
+    pub(crate) old: PathBuf,
+    pub(crate) song: Result<Song, String>,
+    pub(crate) ticked: bool,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -177,7 +195,7 @@ impl App {
                 "Download these songs again with clean tags, track numbers and a square cover, then move the old files to the Trash",
             );
             if fix.clicked() {
-                self.fix_confirm = Some(songs);
+                self.start_fix(ui.ctx(), songs);
             }
             if ui.button("Open in file manager").on_hover_text("Open the music folder").clicked()
                 && let Err(e) = backend::open_with("xdg-open", std::slice::from_ref(&dir))
@@ -348,16 +366,78 @@ impl App {
         }
     }
 
+    /// Look every song up first; nothing downloads until "Fix" in the preview.
+    fn start_fix(&mut self, ctx: &egui::Context, files: Vec<PathBuf>) {
+        self.fix_runs += 1;
+        let (run, total, cancel) = (self.fix_runs, files.len(), Arc::new(AtomicBool::new(false)));
+        self.fix = Some(Fix { run, total, rows: vec![], done: false, cancel: cancel.clone() });
+        let root = self.settings.music_dir.clone();
+        self.spawn(ctx, move |tx| {
+            for old in files {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                let song = backend::resolve(&root, &old).map(|mut s| {
+                    backend::fill_from_album(&mut s); // track number and year, for the preview
+                    s
+                });
+                let _ = tx.send(Msg::Resolved(run, old, song));
+            }
+            Msg::ResolveDone(run)
+        });
+    }
+
     pub(crate) fn fix_dialog(&mut self, ctx: &egui::Context) {
-        let Some(files) = &self.fix_confirm else { return };
+        let Some(fix) = &mut self.fix else { return };
+        let root = &self.settings.music_dir;
         let mut answer = None;
         egui::Modal::new(egui::Id::new("fix")).show(ctx, |ui| {
-            let n = files.len();
-            ui.heading(if n == 1 { "Fix tags on 1 song?".to_string() } else { format!("Fix tags on {n} songs?") });
-            ui.label("Mixtape downloads each song again from YouTube Music, with its album's title, track number, year and a square cover, into Artist/Album. The old file then goes to the Trash.");
-            ui.weak("Each song is found by its artist folder and file name. Songs that can't be found are left alone.");
+            let ticked = fix.rows.iter().filter(|r| r.ticked).count();
+            if fix.done {
+                ui.heading(if ticked == 1 { "Fix tags on 1 song?".to_string() } else { format!("Fix tags on {ticked} songs?") });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.heading(format!("Looking up {} of {}…", fix.rows.len() + 1, fix.total));
+                });
+            }
+            ui.label("Mixtape downloads each ticked song again from YouTube Music, with its album's title, track number, year and a square cover, into Artist/Album. The old file then goes to the Trash.");
+            ui.weak("Untick a wrong match to leave that file alone.");
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical().max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
+                for r in &mut fix.rows {
+                    let shown = r.old.strip_prefix(root).unwrap_or(&r.old).display().to_string();
+                    match &r.song {
+                        Ok(song) => {
+                            ui.checkbox(&mut r.ticked, shown);
+                            let [artist, album, file] = backend::parts(song);
+                            let place = root.join(&artist).join(&album).join(&file);
+                            let to = if r.old.with_extension("") == place {
+                                "same place, new tags".to_string()
+                            } else if song.year.is_empty() {
+                                format!("{artist} / {album} / {file}")
+                            } else {
+                                format!("{artist} / {album} ({}) / {file}", song.year)
+                            };
+                            ui.horizontal(|ui| {
+                                ui.add_space(ui.spacing().indent);
+                                ui.weak(format!("→ {to}"));
+                            });
+                        }
+                        Err(e) => {
+                            ui.label(shown);
+                            ui.horizontal(|ui| {
+                                ui.add_space(ui.spacing().indent);
+                                ui.colored_label(ui.visuals().warn_fg_color, "Not found, left alone").on_hover_text(e);
+                            });
+                        }
+                    }
+                }
+            });
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.button("Fix tags").clicked() {
+                let label = if ticked == 1 { "Fix 1 song".to_string() } else { format!("Fix {ticked} songs") };
+                if ui.add_enabled(fix.done && ticked > 0, egui::Button::new(label)).clicked() {
                     answer = Some(true);
                 }
                 if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -365,21 +445,16 @@ impl App {
                 }
             });
         });
-        if let Some(yes) = answer {
-            let files = self.fix_confirm.take().unwrap();
-            if yes {
-                self.selected.clear();
-                self.notify(format!("Looking up {} songs…", files.len()));
-                let root = self.settings.music_dir.clone();
-                self.spawn(ctx, move |tx| {
-                    let mut missed = 0;
-                    for old in files {
-                        let song = backend::resolve(&root, &old);
-                        missed += usize::from(song.is_err());
-                        let _ = tx.send(Msg::Resolved(old, song));
-                    }
-                    Msg::ResolveDone(missed)
-                });
+        let Some(yes) = answer else { return };
+        let fix = self.fix.take().unwrap();
+        fix.cancel.store(true, Ordering::Relaxed);
+        if yes {
+            self.selected.clear();
+            for r in fix.rows.into_iter().filter(|r| r.ticked) {
+                let Ok(song) = r.song else { continue };
+                self.replaces.insert(song.id.clone(), r.old);
+                self.downloads.0.lock().overwrite.insert(song.id.clone());
+                self.enqueue(song);
             }
         }
     }

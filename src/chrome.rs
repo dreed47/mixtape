@@ -38,12 +38,7 @@ impl App {
             if i.consume_key(Modifiers::NONE, Key::F1) {
                 self.show_keys = true;
             }
-            if typing
-                || self.confirm.is_some()
-                || self.trash_confirm.is_some()
-                || self.fix_confirm.is_some()
-                || self.delete_confirm.is_some()
-            {
+            if typing || self.confirm.is_some() || self.trash_confirm.is_some() || self.fix.is_some() || self.delete_confirm.is_some() {
                 return;
             }
             if i.consume_key(Modifiers::NONE, Key::Questionmark) || i.consume_key(Modifiers::SHIFT, Key::Slash) {

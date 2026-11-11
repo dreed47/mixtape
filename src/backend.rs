@@ -595,7 +595,7 @@ pub fn album_tracks(browse_id: &str) -> Result<Vec<Song>, String> {
 static ALBUMS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Vec<Song>>>> = std::sync::OnceLock::new();
 
 /// A song found by search has no track number or year; its album's track list has both.
-fn fill_from_album(s: &mut Song) {
+pub fn fill_from_album(s: &mut Song) {
     if s.track.is_some() || s.album_id.is_empty() {
         return;
     }
@@ -635,7 +635,7 @@ fn safe_name(s: &str, empty: &str) -> String {
 }
 
 /// Artist, album and file name (without extension). Album tracks start with their number so players keep album order.
-fn parts(s: &Song) -> [String; 3] {
+pub fn parts(s: &Song) -> [String; 3] {
     let title = safe_name(&s.title, s.id.as_str());
     let file = match s.track {
         Some(n) => format!("{n:02} {title}"),
