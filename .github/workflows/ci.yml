@@ -11,6 +11,8 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # A hung step (apt-get has hung on GitHub's runners) fails after 15 minutes, not 6 hours.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
