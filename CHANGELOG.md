@@ -6,6 +6,9 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 
 ## 0.8.0
 
+- Search previews (▶) play again. YouTube started refusing mpv's own
+  stream request (HTTP 403), so yt-dlp now fetches the audio and pipes it
+  to mpv. Switching away from the Search tab stops a preview.
 - **Fix tags** shows a preview first. It looks up every ticked song, then
   lists where each one will land (Artist / Album (Year) / NN Title), or that
   it couldn't be found and stays as it is. Untick a wrong match; nothing

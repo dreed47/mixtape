@@ -5,7 +5,8 @@ use crate::*;
 /// Plays one search result at a time through mpv, without saving it.
 pub(crate) struct Preview {
     pub(crate) mpv: bool,
-    pub(crate) playing: Option<(String, std::process::Child)>,
+    /// The song, and its yt-dlp and mpv.
+    pub(crate) playing: Option<(String, [std::process::Child; 2])>,
     /// The result under the pointer last frame, for Space.
     pub(crate) hovered: Option<String>,
     /// The ▶ or ⏹ clicked this frame.
@@ -28,18 +29,20 @@ impl Preview {
     }
 
     pub(crate) fn stop(&mut self) {
-        if let Some((_, mut child)) = self.playing.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Some((_, children)) = self.playing.take() {
+            for mut child in children {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
         }
     }
 
     /// Forgets a preview that has played to the end.
     pub(crate) fn poll(&mut self) {
-        if let Some((_, child)) = &mut self.playing
-            && !matches!(child.try_wait(), Ok(None))
+        if let Some((_, [_, mpv])) = &mut self.playing
+            && !matches!(mpv.try_wait(), Ok(None))
         {
-            self.playing = None;
+            self.stop(); // also reaps yt-dlp
         }
     }
 }

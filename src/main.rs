@@ -535,6 +535,9 @@ impl eframe::App for App {
                 self.apply_music_dir(ui.ctx());
                 self.draft.music_dir = self.settings.music_dir.clone();
             }
+            if self.tab != Tab::Search {
+                self.preview.stop(); // a preview belongs to the Search tab
+            }
             match self.tab {
                 Tab::Search => self.search_tab(ui),
                 Tab::Library => self.library_tab(ui),

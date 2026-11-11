@@ -377,19 +377,35 @@ pub fn mpv_installed() -> bool {
     on_path("mpv")
 }
 
-/// Streams a song's audio through mpv, saving nothing.
-pub fn preview(id: &str) -> Result<std::process::Child, String> {
+/// Streams a song's audio through mpv, saving nothing: yt-dlp fetches it and pipes it to mpv.
+/// (mpv fetching the stream address itself now gets HTTP 403 from YouTube.)
+pub fn preview(id: &str) -> Result<[std::process::Child; 2], String> {
     if !safe_id(id, 11) {
         return Err(format!("bad video id {id:?}"));
     }
-    Command::new("mpv")
-        .args(["--no-video", "--really-quiet", "--no-terminal", "--ytdl-format=bestaudio"])
+    let mut fetch = Command::new("yt-dlp")
+        .args(["-q", "--no-warnings", "--no-part", "-f", "bestaudio/best", "-o", "-"])
         .arg(format!("https://music.youtube.com/watch?v={id}"))
         .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("could not start yt-dlp: {e}"))?;
+    let audio = fetch.stdout.take().ok_or("yt-dlp gave no output")?;
+    match Command::new("mpv")
+        .args(["--no-video", "--really-quiet", "--no-terminal", "-"])
+        .stdin(audio)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| format!("could not start mpv: {e}"))
+    {
+        Ok(play) => Ok([fetch, play]),
+        Err(e) => {
+            let _ = fetch.kill();
+            let _ = fetch.wait();
+            Err(format!("could not start mpv: {e}"))
+        }
+    }
 }
 
 pub fn stems_installed() -> bool {
