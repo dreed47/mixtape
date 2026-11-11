@@ -500,8 +500,8 @@ impl eframe::App for App {
         }
         egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Library, "Library");
                 ui.selectable_value(&mut self.tab, Tab::Search, "Search");
+                ui.selectable_value(&mut self.tab, Tab::Library, "Library");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let gear = egui::RichText::new("⚙").size(20.0);
                     ui.selectable_value(&mut self.tab, Tab::Settings, gear).on_hover_text("Settings");

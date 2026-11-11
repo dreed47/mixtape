@@ -109,6 +109,30 @@ fn the_music_folder_itself_has_no_tick_box() {
 }
 
 #[test]
+fn select_all_ticks_only_the_songs_shown_and_clears_again() {
+    let (mut state, dir) = app("select-all");
+    std::fs::create_dir_all(dir.join("Queen/Greatest Hits")).unwrap();
+    std::fs::create_dir_all(dir.join("Abba/Gold")).unwrap();
+    for song in
+        ["Queen/Greatest Hits/01 Bohemian Rhapsody.mp3", "Queen/Greatest Hits/02 Under Pressure.mp3", "Abba/Gold/01 Dancing Queen.mp3"]
+    {
+        std::fs::write(dir.join(song), "").unwrap();
+    }
+    state.scan = Some(backend::scan(&dir));
+    state.library_filter = "rhapsody".into();
+    let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.library_tab(ui), state);
+    harness.run();
+    harness.get_by_label("Select all (1)").click();
+    harness.run();
+    let want: HashSet<PathBuf> = [dir.join("Queen/Greatest Hits/01 Bohemian Rhapsody.mp3")].into();
+    assert_eq!(harness.state().selected, want);
+    harness.get_by_label("1 selected").click();
+    harness.run();
+    assert!(harness.state().selected.is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn trashing_a_folder_says_it_is_a_whole_folder() {
     let (mut state, dir) = app("trash");
     let album = dir.join("Queen/Greatest Hits");

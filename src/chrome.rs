@@ -12,10 +12,10 @@ impl App {
         let mut toggle_preview = None;
         ctx.input_mut(|i| {
             if i.consume_shortcut(&ctrl(Key::Num1)) {
-                self.tab = Tab::Library;
+                self.tab = Tab::Search;
             }
             if i.consume_shortcut(&ctrl(Key::Num2)) {
-                self.tab = Tab::Search;
+                self.tab = Tab::Library;
             }
             if i.consume_shortcut(&ctrl(Key::Comma)) {
                 self.tab = Tab::Settings;
@@ -80,7 +80,7 @@ impl App {
             return;
         }
         const KEYS: [(&str, &str); 12] = [
-            ("Ctrl+1 / Ctrl+2", "Library / Search"),
+            ("Ctrl+1 / Ctrl+2", "Search / Library"),
             ("Ctrl+,", "Settings"),
             ("Ctrl+F", "Search box, or the Library filter"),
             ("Enter", "Search"),

@@ -49,7 +49,7 @@ when Omarchy is installed and works on any Linux desktop otherwise.
 
 | Keys | Does |
 | --- | --- |
-| Ctrl+1 / Ctrl+2 / Ctrl+, | Library / Search / Settings |
+| Ctrl+1 / Ctrl+2 / Ctrl+, | Search / Library / Settings |
 | Ctrl+F | Search box, or the Library filter |
 | Space | Preview the result under the pointer, or stop it |
 | Ctrl+D | Download selected |

@@ -4,11 +4,18 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 `Cargo.toml`, shows in the window's footer, and each release is tagged
 `vX.Y.Z`.
 
-## 0.6.0
+## Unreleased
 
-Known issue: the "downloads finished" desktop notification doesn't always
-appear yet (reported on a real hidden-workspace test; a scripted test did
-get it). Under investigation.
+- Search results you already have (in your library or just downloaded) show
+  a ✔ before the title, so they stand out when you scan a list.
+- Search is now the first tab and Library the second (Ctrl+1 / Ctrl+2
+  follow). Mixtape still opens on Library.
+- Library has a **Select all** box above the list. It ticks every song shown
+  in a filtered list, Recently added, or Duplicates, never folders. With
+  ticks, it shows how many are selected and clears them in one click. It
+  replaces the **Clear selection** button.
+
+## 0.6.0
 
 - Downloads keep going while Mixtape is on another workspace or minimized,
   and the "finished" notification arrives then. On Wayland a hidden window

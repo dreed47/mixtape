@@ -179,9 +179,6 @@ impl App {
             if fix.clicked() {
                 self.fix_confirm = Some(songs);
             }
-            if ui.add_enabled(n > 0, egui::Button::new("Clear selection")).clicked() {
-                self.selected.clear();
-            }
             if ui.button("Open in file manager").on_hover_text("Open the music folder").clicked()
                 && let Err(e) = backend::open_with("xdg-open", std::slice::from_ref(&dir))
             {
@@ -237,6 +234,7 @@ impl App {
             covers_pending: &self.covers_pending,
             wanted_covers: vec![],
         };
+        const MAX: usize = 500; // songs shown in a flat list
         let filter = self.library_filter.trim();
         let flat: Option<Vec<&PathBuf>> = if !filter.is_empty() {
             Some(scan.matching(filter))
@@ -251,6 +249,27 @@ impl App {
             shown.iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>().join(" / ")
         };
         let (duplicates, indexing) = (&self.duplicates, self.indexing);
+        // Songs only, never folders, so one tick can't put the whole library in the Trash.
+        // The unfiltered folder tree has no "all"; there the box only clears.
+        let shown: Vec<&PathBuf> = match &flat {
+            Some(files) => files.iter().take(MAX).copied().collect(),
+            None if self.view == View::Duplicates && !indexing => duplicates.iter().flatten().collect(),
+            None => vec![],
+        };
+        let ticked = tree.selected.len();
+        if ticked > 0 || !shown.is_empty() {
+            let all = !shown.is_empty() && shown.iter().all(|p| tree.selected.contains(*p));
+            let mut on = ticked > 0;
+            let text = if ticked > 0 { format!("{ticked} selected") } else { format!("Select all ({})", shown.len()) };
+            let tip = if ticked > 0 { "Clear the selection" } else { "Tick every song shown" };
+            if ui.add(egui::Checkbox::new(&mut on, text).indeterminate(ticked > 0 && !all)).on_hover_text(tip).changed() {
+                if ticked > 0 {
+                    tree.selected.clear();
+                } else {
+                    tree.selected.extend(shown.iter().map(|p| (*p).clone()));
+                }
+            }
+        }
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| match &flat {
             None if self.view == View::Duplicates => {
                 if indexing {
@@ -281,7 +300,6 @@ impl App {
                 ui.weak("No songs match.");
             }
             Some(files) => {
-                const MAX: usize = 500;
                 for file in files.iter().take(MAX) {
                     file_row(ui, file, &label(file), &mut tree);
                 }

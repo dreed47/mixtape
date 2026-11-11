@@ -103,6 +103,16 @@ pub(crate) fn song_row(
     let other_copy = if from_album && !have { elsewhere(lib.scan, &row_.song) } else { None };
     let id = row_.song.id.clone();
     let row_duration = row_.song.duration.clone();
+    let owned = have || matches!(lib.jobs.get(&id), Some(Job::Done(_)));
+    // The status on the far right is easy to miss when scanning a list, so mark the title too.
+    let title = |ui: &mut egui::Ui, text: &str| {
+        ui.horizontal(|ui| {
+            if owned {
+                ui.colored_label(ui.visuals().hyperlink_color, "✔");
+            }
+            fit(ui, egui::RichText::new(text).strong());
+        });
+    };
     let hovered = row(
         ui,
         |ui| {
@@ -133,12 +143,12 @@ pub(crate) fn song_row(
             if from_album {
                 let number = row_.song.track.map(|n| format!("{n:02}")).unwrap_or_default();
                 ui.add_sized([22.0, 18.0], egui::Label::new(egui::RichText::new(number).weak()));
-                fit(ui, egui::RichText::new(&row_.song.title).strong());
+                title(ui, &row_.song.title);
                 return;
             }
             cover(ui, &row_.song.thumb, 40.0);
             ui.vertical(|ui| {
-                fit(ui, egui::RichText::new(&row_.song.title).strong());
+                title(ui, &row_.song.title);
                 let album = if row_.song.album.is_empty() {
                     " · no album (goes to Singles)".to_string()
                 } else {
