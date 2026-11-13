@@ -182,8 +182,8 @@ impl App {
                 self.search_gen += 1;
                 self.searching = true;
                 self.search_error = None;
-                let (generation, q) = (self.search_gen, self.query.trim().to_string());
-                self.spawn(ui.ctx(), move |_| Msg::Search(generation, backend::search(&q)));
+                let (generation, q, limit) = (self.search_gen, self.query.trim().to_string(), self.settings.search_limit);
+                self.spawn(ui.ctx(), move |_| Msg::Search(generation, backend::search(&q, limit)));
             }
         });
 

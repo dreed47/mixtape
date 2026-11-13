@@ -46,12 +46,32 @@ fn album(checked: bool, tracks: Option<Vec<Row>>) -> AlbumRow {
 #[test]
 fn settings_page_has_its_sections_and_settings() {
     let (state, dir) = app("settings");
-    let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.settings_tab(ui), state);
+    // Tall enough that Notifications stays on screen under the Search section. The real window scrolls.
+    let mut harness =
+        Harness::builder().with_size(egui::vec2(800.0, 1000.0)).build_ui_state(|ui, app: &mut App| app.settings_tab(ui), state);
     harness.run();
-    for label in ["Settings", "Library", "Downloads", "App", "Dependencies", "Music folder", "Player", "Format", "Premium", "Notifications"]
-    {
+    for label in [
+        "Settings",
+        "Library",
+        "Search",
+        "Downloads",
+        "App",
+        "Dependencies",
+        "Music folder",
+        "Player",
+        "Results",
+        "Format",
+        "Premium",
+        "Notifications",
+    ] {
         harness.get_by_label(label);
     }
+    assert_eq!(harness.state().settings.search_limit, 20);
+    // The first slider is Results (5 to 50). A click away from 20 stores the new count.
+    harness.get_all_by_role(Role::Slider).next().unwrap().click();
+    harness.run();
+    assert_ne!(harness.state().settings.search_limit, 20);
+    assert!((5..=50).contains(&harness.state().settings.search_limit));
     // The notification setting is on by default and turns off with a click.
     assert!(harness.state().settings.notify);
     harness.get_by_label("Tell me when downloads finish").click();
@@ -91,6 +111,38 @@ fn ticking_a_song_you_have_asks_first() {
     harness.run();
     assert!(harness.state().confirm.is_some(), "asks \"Download again?\"");
     assert!(!harness.state().songs[0].checked, "not ticked until you say yes");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn right_click_a_folder_offers_play() {
+    let (mut state, dir) = app("play-folder");
+    std::fs::create_dir_all(dir.join("Queen/Greatest Hits")).unwrap();
+    std::fs::write(dir.join("Queen/Greatest Hits/01 Bohemian Rhapsody.mp3"), "").unwrap();
+    state.scan = Some(backend::scan(&dir));
+    let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.library_tab(ui), state);
+    harness.run();
+    // Queen is the artist folder. An album uses the same menu.
+    harness.get_by_label("Queen").click_secondary();
+    harness.run();
+    harness.get_by_label("Play");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn right_click_a_song_offers_play() {
+    let (mut state, dir) = app("play-song");
+    std::fs::create_dir_all(dir.join("Queen/Greatest Hits")).unwrap();
+    std::fs::write(dir.join("Queen/Greatest Hits/01 Bohemian Rhapsody.mp3"), "").unwrap();
+    state.scan = Some(backend::scan(&dir));
+    state.library_filter = "Bohemian".into();
+    let mut harness = Harness::new_ui_state(|ui, app: &mut App| app.library_tab(ui), state);
+    harness.run();
+    harness
+        .get(egui_kittest::kittest::By::new().role(Role::Label).value("♪  Queen / Greatest Hits / 01 Bohemian Rhapsody"))
+        .click_secondary();
+    harness.run();
+    harness.get_by_label("Play");
     std::fs::remove_dir_all(dir).unwrap();
 }
 

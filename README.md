@@ -32,7 +32,8 @@ when Omarchy is installed and works on any Linux desktop otherwise.
   artist, album, or song name, or switch to **Recently added**. Tick songs or
   folders, then click **Play selected** to open them in your player, or
   **Move to Trash** to remove them (you can restore them from the Trash).
-  Double-click a song to play it. Right-click a song to play it, open it in the
+  Double-click a song to play it. Right-click a song or a folder and choose
+  **Play** to open it in your player. Right-click a song to also open it in the
   Stems app when it is installed, or show it in your file manager. Right-click
   a folder, or click **Open in file manager**, to open it there.
 - **Fix tags.** Tick older songs in the Library and click **Fix tags** to
@@ -42,8 +43,9 @@ when Omarchy is installed and works on any Linux desktop otherwise.
 - **Downloads resume.** Songs still waiting when you close Mixtape start
   again the next time you open it.
 - **Settings.** Choose the music folder (local or a network share), the
-  player (Amberol, VLC, mpv, or any command), the file format, and whether to
-  use a YouTube Music Premium login.
+  player (Amberol, VLC, mpv, or any command), the file format, whether to
+  use a YouTube Music Premium login, and how many songs, albums, and
+  artists a search lists.
 
 ## Keyboard shortcuts
 

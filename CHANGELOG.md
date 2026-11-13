@@ -4,6 +4,16 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 `Cargo.toml`, shows in the window's footer, and each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- Right-click an album or an artist in the Library and choose **Play** to
+  open it in your player, without ticking it first. Right-click a song for
+  the same **Play** command.
+- **Settings > Search > Results** sets how many songs, albums, and artists
+  a search lists (5 to 50, default 20). Each album in the results shows at
+  most that many tracks. YouTube Music's first page is about 20 items, so a
+  lower number has to be cut down after the reply arrives.
+
 ## 0.8.0
 
 - Search previews (▶) play again. YouTube started refusing mpv's own

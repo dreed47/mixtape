@@ -112,9 +112,33 @@ pub struct Settings {
     pub notify: bool,
     /// Size of text and controls, 1.0 = normal. Ctrl + and Ctrl − change it too.
     pub text_scale: f32,
+    /// How many songs, albums, and artists a search lists, and how many tracks each of those albums shows.
+    pub search_limit: u32,
 }
 
 pub const TEXT_SCALES: std::ops::RangeInclusive<f32> = 0.8..=2.0;
+
+/// Songs a search lists when Settings has no other count.
+pub const DEFAULT_SEARCH_LIMIT: u32 = 20;
+/// The range the Results slider allows.
+pub const SEARCH_LIMITS: std::ops::RangeInclusive<u32> = 5..=50;
+
+/// Keeps a search count inside [`SEARCH_LIMITS`].
+pub fn clamp_search_limit(n: u32) -> u32 {
+    n.clamp(*SEARCH_LIMITS.start(), *SEARCH_LIMITS.end())
+}
+
+/// Drops anything past the search limit. YouTube Music sends a full first page (about 20 items)
+/// even when asked for fewer, so the raw list is not the limit.
+pub fn apply_search_limit<T>(items: &mut Vec<T>, limit: u32) {
+    items.truncate(clamp_search_limit(limit) as usize);
+}
+
+fn cap_search(result: &mut SearchResult, limit: u32) {
+    apply_search_limit(&mut result.songs, limit);
+    apply_search_limit(&mut result.albums, limit);
+    apply_search_limit(&mut result.artists, limit);
+}
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -151,13 +175,17 @@ impl Default for Settings {
             check_updates: true,
             notify: true,
             text_scale: 1.0,
+            search_limit: DEFAULT_SEARCH_LIMIT,
         }
     }
 }
 
 impl Settings {
     pub fn load() -> Self {
-        std::fs::read_to_string(settings_file()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+        let mut settings: Settings =
+            std::fs::read_to_string(settings_file()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        settings.search_limit = clamp_search_limit(settings.search_limit);
+        settings
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -535,14 +563,31 @@ pub fn friendly(raw: &str) -> String {
 }
 
 fn ytmusic(mode: &str, arg: &str) -> Result<String, String> {
-    run(Command::new("uv").args(["run", "-q", "--no-project", "--with", YTMUSICAPI, "python", "-I", "-c", YTMUSIC_PY, mode, arg]))
+    ytmusic_args(mode, &[arg])
+}
+
+fn ytmusic_args(mode: &str, args: &[&str]) -> Result<String, String> {
+    let mut cmd = Command::new("uv");
+    cmd.args(["run", "-q", "--no-project", "--with", YTMUSICAPI, "python", "-I", "-c", YTMUSIC_PY, mode]);
+    cmd.args(args);
+    run(&mut cmd)
 }
 
 /// A search, or a pasted YouTube / YouTube Music link to a song, album, playlist or artist.
-pub fn search(query: &str) -> Result<SearchResult, String> {
-    let mode = if is_link(query) { "link" } else { "search" };
-    let mut result: SearchResult = serde_json::from_str(&ytmusic(mode, query)?).map_err(|e| e.to_string())?;
+/// `limit` caps songs, albums, and artists. A link ignores it and opens that one page.
+pub fn search(query: &str, limit: u32) -> Result<SearchResult, String> {
+    let linked = is_link(query);
+    let raw = if linked {
+        ytmusic("link", query)?
+    } else {
+        let n = clamp_search_limit(limit).to_string();
+        ytmusic_args("search", &[query, &n])?
+    };
+    let mut result: SearchResult = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
     tidy(&mut result.songs);
+    if !linked {
+        cap_search(&mut result, limit);
+    }
     Ok(result)
 }
 
@@ -836,7 +881,7 @@ pub fn resolve(root: &Path, path: &Path) -> Result<Song, String> {
     // Keep the song on the album it's filed under (a Greatest Hits stays a Greatest Hits).
     let folder = path.parent().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     if path.strip_prefix(root).is_ok_and(|p| p.components().count() >= 3) && !folder.eq_ignore_ascii_case("Singles") {
-        let found = search(&format!("{artist} {folder}"))?;
+        let found = search(&format!("{artist} {folder}"), DEFAULT_SEARCH_LIMIT)?;
         let album = found.albums.iter().find(|a| norm(&a.title) == norm(&folder) && norm(&a.artists).contains(&norm(&artist)));
         if let Some(album) = album
             && let Some(song) = album_tracks(&album.id)?.into_iter().find(|s| same_title(&s))
@@ -844,12 +889,16 @@ pub fn resolve(root: &Path, path: &Path) -> Result<Song, String> {
             return Ok(song);
         }
     }
-    let found = search(&format!("{artist} {title}"))?;
+    let found = search(&format!("{artist} {title}"), DEFAULT_SEARCH_LIMIT)?;
     if let Some(song) = found.songs.iter().filter(same_title).find(same_artist).or_else(|| found.songs.iter().find(same_title)) {
         return Ok(song.clone());
     }
     let link = source_link(path).ok_or_else(|| format!("couldn't find \"{title}\" by {artist} on YouTube Music"))?;
-    search(&link)?.songs.into_iter().next().ok_or_else(|| format!("couldn't find \"{title}\" by {artist} on YouTube Music"))
+    search(&link, DEFAULT_SEARCH_LIMIT)?
+        .songs
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("couldn't find \"{title}\" by {artist} on YouTube Music"))
 }
 
 /// "Queen", "Bicycle Race" from <root>/Queen/Greatest Hits/05 Bicycle Race.mp3.
@@ -1478,8 +1527,43 @@ mod tests {
         let s: Settings = serde_json::from_str(r#"{"music_dir":"/m","player":"vlc"}"#).unwrap();
         assert!(s.format == Format::Mp3 && s.cookies_browser.is_empty());
         assert!(s.notify, "notifications are on unless turned off");
+        assert_eq!(s.search_limit, DEFAULT_SEARCH_LIMIT, "older settings files keep listing 20 songs");
         let s: Settings = serde_json::from_str(r#"{"format":"original","cookies_browser":"firefox"}"#).unwrap();
         assert!(s.format == Format::Original && s.cookies_browser == "firefox");
+    }
+
+    #[test]
+    fn search_limit_stays_in_range() {
+        assert_eq!(clamp_search_limit(0), 5);
+        assert_eq!(clamp_search_limit(20), 20);
+        assert_eq!(clamp_search_limit(10_000), 50);
+        assert_eq!(Settings::default().search_limit, DEFAULT_SEARCH_LIMIT);
+    }
+
+    #[test]
+    fn search_results_stop_at_the_limit() {
+        let mut result = SearchResult {
+            songs: (0..25).map(|i| song("John Prine", "Album", &format!("Song {i}"))).collect(),
+            albums: (0..12)
+                .map(|i| Album {
+                    id: format!("a{i}"),
+                    title: format!("Album {i}"),
+                    artists: "John Prine".into(),
+                    year: "1971".into(),
+                    kind: "Album".into(),
+                    thumb: String::new(),
+                })
+                .collect(),
+            artists: (0..4).map(|i| Artist { id: format!("c{i}"), name: format!("Artist {i}") }).collect(),
+            title: None,
+        };
+        cap_search(&mut result, 10);
+        assert_eq!(result.songs.len(), 10);
+        assert_eq!(result.albums.len(), 10);
+        assert_eq!(result.artists.len(), 4, "a shorter list stays as it is");
+        let mut tracks: Vec<Song> = (0..14).map(|i| song("John Prine", "Album", &format!("Track {i}"))).collect();
+        apply_search_limit(&mut tracks, 10);
+        assert_eq!(tracks.len(), 10);
     }
 
     #[test]

@@ -112,8 +112,6 @@ pub(crate) struct Tree<'a> {
     pub(crate) wanted_covers: Vec<(PathBuf, Vec<PathBuf>, bool)>,
 }
 
-/// One folder in the Library tree, then its subfolders and songs, each with a tick box.
-/// Double-click plays a song; right-click opens a menu.
 /// The songs of the first folder under `folder` that has any.
 fn first_album(folder: &Folder) -> &[PathBuf] {
     if !folder.files.is_empty() {
@@ -122,6 +120,8 @@ fn first_album(folder: &Folder) -> &[PathBuf] {
     folder.children.iter().map(first_album).find(|f| !f.is_empty()).unwrap_or(&[])
 }
 
+/// One folder in the Library tree, then its subfolders and songs, each with a tick box.
+/// Double-click plays a song. Right-click a song or a folder to play it.
 /// `depth` 0 is the music folder itself, 1 an artist folder.
 pub(crate) fn folder_row(ui: &mut egui::Ui, folder: &Folder, tree: &mut Tree, depth: usize) {
     let artist = depth == 1;
@@ -149,6 +149,11 @@ pub(crate) fn folder_row(ui: &mut egui::Ui, folder: &Folder, tree: &mut Tree, de
             ui.add(egui::Label::new(&folder.name).sense(egui::Sense::click()))
         };
         row.context_menu(|ui| {
+            // The music folder itself stays out of Play, same as its missing tick box.
+            if depth > 0 && ui.button("Play").clicked() {
+                tree.action = Some(LibraryAction::Play(folder.path.clone()));
+                ui.close();
+            }
             if ui.button("Open in file manager").clicked() {
                 tree.action = Some(LibraryAction::Reveal(folder.path.clone()));
                 ui.close();

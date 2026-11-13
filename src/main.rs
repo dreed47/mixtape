@@ -289,7 +289,9 @@ impl App {
                 if let Some(a) = self.albums.iter_mut().find(|a| a.album.id == id) {
                     a.loading = false;
                     match result {
-                        Ok(tracks) => {
+                        Ok(mut tracks) => {
+                            // The album's own length can be longer than the search limit. Show the first tracks only.
+                            backend::apply_search_limit(&mut tracks, self.settings.search_limit);
                             let checked = a.checked;
                             a.tracks = Some(
                                 tracks.into_iter().map(|song| Row { checked: checked && !in_album(logged, dir, &song), song }).collect(),

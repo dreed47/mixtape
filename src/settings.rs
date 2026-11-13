@@ -35,7 +35,7 @@ pub(crate) fn hint(ui: &mut egui::Ui, text: &str) {
 
 impl App {
     /// Settings apply and save as they change. The music folder applies when you leave its box
-    /// (or pick one with Browse), and the text size when you let go of the slider.
+    /// (or pick one with Browse). Text size and the search limit apply when you let go of the slider.
     pub(crate) fn settings_tab(&mut self, ui: &mut egui::Ui) {
         let before = self.settings.clone();
         ui.heading("Settings");
@@ -80,6 +80,17 @@ impl App {
             } else {
                 hint(ui, "Plays songs and folders from the Library.");
             }
+        });
+
+        section(ui, "Search");
+        setting(ui, "Results", |ui| {
+            self.draft.search_limit = backend::clamp_search_limit(self.draft.search_limit);
+            let slider = ui.add(egui::Slider::new(&mut self.draft.search_limit, backend::SEARCH_LIMITS).step_by(5.0).max_decimals(0));
+            // Saving on every step of a drag would rewrite settings.json the whole time.
+            if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                self.settings.search_limit = self.draft.search_limit;
+            }
+            hint(ui, "How many songs, albums, and artists a search lists. Each album shows at most that many tracks.");
         });
 
         section(ui, "Downloads");

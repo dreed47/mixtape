@@ -55,14 +55,32 @@ def page(songs=(), albums=(), artists=(), title=None):
     return {"songs": list(songs), "albums": list(albums), "artists": list(artists), "title": title}
 
 
-def search(query):
-    songs = [song(s) for s in yt.search(query, filter="songs", limit=20) if s.get("videoId")]
-    albums = [album_item(a) for a in yt.search(query, filter="albums", limit=8)[:8] if a.get("browseId")]
+# Same bounds as SEARCH_LIMITS in backend.rs.
+SONG_LIMIT_MIN = 5
+SONG_LIMIT_MAX = 50
+SONG_LIMIT_DEFAULT = 20
+
+
+def song_limit(raw):
+    """A song-count a search is allowed to ask for."""
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return SONG_LIMIT_DEFAULT
+    return max(SONG_LIMIT_MIN, min(n, SONG_LIMIT_MAX))
+
+
+def search(query, limit=SONG_LIMIT_DEFAULT):
+    # ytmusicapi only uses `limit` to fetch further pages. The first page is
+    # about 20 items even when you ask for fewer, so cut it here.
+    n = song_limit(limit)
+    songs = [song(s) for s in yt.search(query, filter="songs", limit=n) if s.get("videoId")][:n]
+    albums = [album_item(a) for a in yt.search(query, filter="albums", limit=n) if a.get("browseId")][:n]
     artists = [
         {"id": a["browseId"], "name": a.get("artist") or ""}
-        for a in yt.search(query, filter="artists", limit=3)[:3]
+        for a in yt.search(query, filter="artists", limit=n)
         if a.get("browseId")
-    ]
+    ][:n]
     return page(songs, albums, artists)
 
 
@@ -133,7 +151,7 @@ def artist_photo(name):
 
 mode, arg = sys.argv[1], sys.argv[2]
 if mode == "search":
-    print(json.dumps(search(arg)))
+    print(json.dumps(search(arg, sys.argv[3] if len(sys.argv) > 3 else SONG_LIMIT_DEFAULT)))
 elif mode == "album":
     print(json.dumps(album_tracks(arg)))
 elif mode == "artist":
