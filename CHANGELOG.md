@@ -4,7 +4,7 @@ Mixtape uses [semantic versioning](https://semver.org). The version is in
 `Cargo.toml`, shows in the window's footer, and each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 0.9.0
 
 - Right-click an album or an artist in the Library and choose **Play** to
   open it in your player, without ticking it first. Right-click a song for
